@@ -328,6 +328,10 @@ class ChatSnapshot:
     # left (epoch rotation only stops them READING, not the read model showing
     # a validly-signed old-epoch injection). Empty = fail open (legacy meta).
     tenure: dict[str, list[list[int]]] = field(default_factory=dict)
+    # Who was still a member when the group was deleted (sorted). The provider
+    # lets only them read, clean up and purge a deleted group; a deletion by an
+    # older client carries none, and then everyone in ``tenure`` may (D-018).
+    final_members: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.kind = _coerce(ChatKind, self.kind, ChatKind.GROUP)
@@ -338,8 +342,18 @@ class ChatSnapshot:
     def is_member(self, user: str) -> bool:
         return user in self.members
 
+    def terminal_reader(self, user: str) -> bool:
+        """May ``user`` still read this deleted group (to see the deletion and
+        clean it up)? The client mirror of the provider rule."""
+        if not self.deleted:
+            return False
+        return user in (self.final_members or self.tenure)
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        out = asdict(self)
+        if not self.final_members:
+            del out["final_members"]  # live metas stay byte-identical
+        return out
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ChatSnapshot":
@@ -356,6 +370,9 @@ class ChatSnapshot:
             if norm:
                 tenure[name] = norm
         base["tenure"] = tenure
+        final = d.get("final_members")
+        base["final_members"] = (list(final) if isinstance(final, list)
+                                 and all(isinstance(n, str) for n in final) else [])
         return cls(**base)
 
 

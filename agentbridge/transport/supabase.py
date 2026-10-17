@@ -7,8 +7,10 @@ Mapping (schema in ``docs/supabase_schema.sql``, pasted once by the owner):
   so ``read_log`` is a WHERE id > cursor — no half-synced-line problem by
   construction);
 - blobs -> one private Storage bucket ("ab-mesh"), keys ``<root>/<path>``;
-- hints -> a realtime BROADCAST channel per root: every writer announces
-  after a write, every watcher wakes early. The channel lives on a daemon
+- hints -> a private realtime BROADCAST channel per root: every writer
+  announces after a write, every watcher wakes early. Only active members
+  of the root may join or send, so it joins as this transport's own
+  identity (docs/NAME_RETENTION_AND_PRIVATE_POKES.md). The channel lives on a daemon
   thread with its own event loop (supabase realtime is async-only — the R1
   note); if the socket is blocked or drops, everything silently degrades to
   pure polling, because the poll stays the source of truth (tenet 6).
@@ -96,6 +98,12 @@ _POSTGREST_TIMEOUT_S = 6
 _STORAGE_TIMEOUT_S = 20
 _FUNCTION_TIMEOUT_S = 6
 _RT_MAX_BACKOFF_S = 15.0
+# A join the server refused for authorization (a revoked member, a policy
+# mistake, a mixed rollout) waits this long, so it does not churn sockets.
+_RT_REFUSED_BACKOFF_S = 300.0
+# How often the Realtime thread re-reads the member session's access token.
+_RT_TOKEN_CHECK_S = 30.0
+_LIST_PAGE = 100  # Storage's maximum page of names per list call
 
 # R76 (docs/SCALING.md §3) — writer-side hint coalescing. A hint is a
 # content-free wake-up; per-class intervals bound how long a write may wait
@@ -1545,7 +1553,9 @@ class SupabaseTransport(Transport):
 
     def purge_deleted_docs(self, older_than_days: float = 30.0) -> None:
         """Hard-drop tombstones old enough that every live mirror has long
-        seen them (the storage janitor calls this on its daily sweep)."""
+        seen them (the storage janitor calls this on its daily sweep).
+        Account rows (``users/``) are kept forever: their tombstone keeps the
+        name taken, and the server skips their hard delete anyway."""
         if not self._delta_ok():
             return
         cutoff = time.time() - older_than_days * 86400
@@ -1553,6 +1563,7 @@ class SupabaseTransport(Transport):
         try:
             self._retry(lambda: self._sb().table("ab_docs").delete()
                         .eq("root", self.root).eq("deleted", True)
+                        .not_.like("path", "users/%")
                         .lt("updated", iso).execute())
         except Exception:  # noqa: BLE001 — next sweep retries
             pass
@@ -1705,21 +1716,55 @@ class SupabaseTransport(Transport):
 
     def _strict_blob_size(self, path: str) -> int | None:
         """Return exact object size; unlike the read API, propagate failures."""
+        obj = self._strict_object(path)
+        return None if obj is None else int((obj.get("metadata") or {}).get("size") or 0) or None
+
+    def _strict_object(self, path: str) -> dict | None:
+        """The exact object's listing row, or None; propagates failures.
+
+        Storage lists 100 names per page, so the lookup searches for the exact
+        name and pages through every match: a folder with more objects must
+        never make a present object look missing.
+        """
         full = f"{self.root}/{_check(path)}"
         parent, _, name = full.rpartition("/")
-        rows = self._retry(lambda: self._store().list(parent))
-        for obj in rows or []:
-            if obj.get("name") == name:
-                meta = obj.get("metadata") or {}
-                return int(meta.get("size") or 0) or None
-        return None
+        offset = 0
+        while True:
+            rows = self._retry(lambda at=offset: self._store().list(
+                parent, {"limit": _LIST_PAGE, "offset": at, "search": name})) or []
+            for obj in rows:
+                if obj.get("name") == name and obj.get("id") is not None:
+                    return obj
+            if len(rows) < _LIST_PAGE:
+                return None
+            offset += _LIST_PAGE
+
+    def list_blobs(self, prefix: str) -> list[str]:
+        """Every object path under the folder ``prefix``, recursively, every
+        page (Storage folder listings are exact: no wildcards)."""
+        folders, out = [_check(prefix.rstrip("/"))], []
+        while folders:
+            folder, offset = folders.pop(), 0
+            while True:
+                rows = self._retry(lambda f=folder, at=offset: self._store().list(
+                    f"{self.root}/{f}", {"limit": _LIST_PAGE, "offset": at})) or []
+                for obj in rows:
+                    name = obj.get("name")
+                    if not isinstance(name, str) or not name:
+                        continue
+                    # Storage reports a sub-folder as an entry without an id.
+                    (folders if obj.get("id") is None else out).append(f"{folder}/{name}")
+                if len(rows) < _LIST_PAGE:
+                    break
+                offset += _LIST_PAGE
+        return sorted(out)
 
     def delete_blob(self, path: str) -> None:
         path = _check(path)
         # A missing object is already the goal. When it is currently visible,
         # require Storage to confirm that exact full key in its delete result;
         # the SDK may otherwise return an empty success under RLS.
-        if self._strict_blob_size(path) is None:
+        if self._strict_object(path) is None:
             return
         full = f"{self.root}/{path}"
 
@@ -1733,6 +1778,13 @@ class SupabaseTransport(Transport):
                 raise TransportError("storage did not confirm exact blob deletion")
 
         self._retry(remove)
+
+    def delete_blobs(self, paths: list[str]) -> None:
+        """Remove many objects, 100 keys a call, without confirmation (an
+        RLS-filtered key is silently kept: list again to know)."""
+        keys = [f"{self.root}/{_check(path)}" for path in paths]
+        for at in range(0, len(keys), _LIST_PAGE):
+            self._retry(lambda chunk=keys[at:at + _LIST_PAGE]: self._store().remove(chunk))
 
     # ---------------------------------------------------------------- events
     def watch(self) -> Watcher:
@@ -1797,7 +1849,34 @@ class SupabaseTransport(Transport):
             with self._rt_state_lock:
                 self._rt_ready_since = time.monotonic()
 
+    def _realtime_identity(self) -> bool:
+        """The private poke channel joins as this transport's own identity
+        (docs/NAME_RETENTION_AND_PRIVATE_POKES.md): a member session or the
+        service key, never anonymously. An injected client is the test seam;
+        the thread re-checks its own credential."""
+        mode = self.auth_mode
+        return (mode.startswith("member:") or mode == "service"
+                or mode.endswith(":service") or mode == "injected")
+
+    def _realtime_token(self) -> str:
+        """The member session's current access token, which the PostgREST
+        client keeps refreshed; the Realtime thread forwards each new one."""
+        client = self._client
+        if client is None or not self.auth_mode.startswith("member:"):
+            return ""
+        try:
+            session = client.auth.get_session()
+        except Exception:  # noqa: BLE001 - no token means no join this time
+            return ""
+        return str(getattr(session, "access_token", "") or "")
+
     def _ensure_rt(self):
+        try:
+            self._sb()     # auth_mode is "" until the client exists
+        except Exception:  # noqa: BLE001 - no client yet: poll-only this tick
+            return None
+        if not self._realtime_identity():
+            return None
         with self._rt_lock:
             if self._closed:
                 return None
@@ -1809,6 +1888,7 @@ class SupabaseTransport(Transport):
             old, self._rt = self._rt, None
             if old is not None:
                 failed = old.status() == "disconnected"
+                refused = bool(getattr(old, "refused", lambda: False)())
                 old.close()
                 if old.alive():
                     self._rt = old
@@ -1822,9 +1902,10 @@ class SupabaseTransport(Transport):
                         self._rt_failures += 1
                         delay = min(2 ** min(self._rt_failures - 1, 6),
                                     _RT_MAX_BACKOFF_S)
-                        self._rt_retry_at = now + min(
-                            _RT_MAX_BACKOFF_S,
-                            delay * (0.85 + random.random() * 0.3))
+                        self._rt_retry_at = now + (
+                            _RT_REFUSED_BACKOFF_S if refused else min(
+                                _RT_MAX_BACKOFF_S,
+                                delay * (0.85 + random.random() * 0.3)))
                         self._rt_ready_since = 0.0
                     self._rt_metric("rt_disconnects")
             with self._rt_state_lock:
@@ -1837,7 +1918,8 @@ class SupabaseTransport(Transport):
                     self._env, self.root, self._on_hint, self._rt_metric,
                     observe_ledger=observe_ledger,
                     on_ledger_event=self._on_ledger_event,
-                    ledger_auth_mode=self.auth_mode,
+                    auth_mode=self.auth_mode,
+                    token_source=self._realtime_token,
                 )
             except Exception:  # noqa: BLE001 — no realtime = poll-only
                 self._rt = None
@@ -1937,6 +2019,12 @@ class _HintWatcher(Watcher):
             pass
 
 
+def _authorization_refusal(error) -> bool:
+    """A join error that names missing permission, not a network fault."""
+    text = str(error or "").lower()
+    return "unauthorized" in text or "permission" in text
+
+
 class _RealtimeThread:
     """One daemon thread owning the async realtime channel for a root.
     Sends and receives change hints; any failure just goes quiet."""
@@ -1944,14 +2032,16 @@ class _RealtimeThread:
     def __init__(self, env: dict[str, str], root: str, on_hint,
                  on_metric=lambda _name: None, *, observe_ledger: bool = False,
                  on_ledger_event=lambda _event_id: None,
-                 ledger_auth_mode: str = "") -> None:
+                 auth_mode: str = "", token_source=None) -> None:
         self._env = env
         self._root = root
         self._on_hint = on_hint
         self._on_metric = on_metric
         self._observe_ledger = bool(observe_ledger)
         self._on_ledger_event = on_ledger_event
-        self._ledger_auth_mode = ledger_auth_mode
+        self._auth_mode = auth_mode
+        self._token_source = token_source
+        self._refused = False
         self._loop = asyncio.new_event_loop()
         self._channel = None
         self._ready = threading.Event()
@@ -2026,6 +2116,9 @@ class _RealtimeThread:
                     self._counted_ready = True
                     self._on_metric("rt_ready")
                 self._maybe_mark_ledger_ready()
+        if value == "CHANNEL_ERROR" and _authorization_refusal(_error):
+            with self._state_lock:
+                self._refused = True
         if value in {"TIMED_OUT", "CLOSED", "CHANNEL_ERROR"}:
             self._mark_disconnected()
 
@@ -2067,31 +2160,27 @@ class _RealtimeThread:
         from realtime import RealtimeChannelOptions
         from supabase import acreate_client
 
-        # Broadcast alone is public. Ledger observation is RLS-filtered and
-        # therefore must join as the same member credential class as PostgREST,
-        # or explicitly use the legacy service credential.
+        # The poke channel is private (docs/NAME_RETENTION_AND_PRIVATE_POKES.md):
+        # only active members of the root may join or send, so it joins as the
+        # transport's own identity and never anonymously. A member reuses the
+        # PostgREST session's access token instead of a second password
+        # sign-in; the legacy service mode uses the service key.
         publishable = self._env.get("SUPABASE_PUBLISHABLE_KEY", "")
         secret = self._env.get("SUPABASE_SECRET_KEY", "")
-        email = self._env.get("SUPABASE_MEMBER_EMAIL", "")
-        password = self._env.get("SUPABASE_MEMBER_PASSWORD", "")
-        member_auth = (
-            self._observe_ledger
-            and self._ledger_auth_mode.startswith("member:")
-            and publishable and email and password
-        )
+        member_auth = (self._auth_mode.startswith("member:")
+                       and bool(publishable) and self._token_source is not None)
         service_auth = (
-            self._observe_ledger
-            and (self._ledger_auth_mode == "service"
-                 or self._ledger_auth_mode.endswith(":service"))
+            (self._auth_mode == "service" or self._auth_mode.endswith(":service"))
             and bool(secret)
         )
-        key = publishable or secret
-        if service_auth:
-            key = secret
-        if self._observe_ledger and not (member_auth or service_auth):
-            raise ValidationError("Supabase ledger Realtime identity is unavailable")
-        if not key:
-            raise ValidationError("Supabase Realtime credential is unavailable")
+        if not (member_auth or service_auth):
+            raise ValidationError("Supabase Realtime identity is unavailable")
+        access_token = ""
+        if member_auth:
+            access_token = await asyncio.to_thread(self._token_source)
+            if not access_token:
+                raise ValidationError("Supabase member Realtime token is unavailable")
+        key = publishable if member_auth else secret
         sb = None
         try:
             sb = await asyncio.wait_for(
@@ -2099,22 +2188,18 @@ class _RealtimeThread:
                 timeout=10.0,
             )
             if member_auth:
-                auth_response = await asyncio.wait_for(sb.auth.sign_in_with_password({
-                    "email": email, "password": password,
-                }), timeout=10.0)
-                session = getattr(auth_response, "session", None)
-                access_token = getattr(session, "access_token", "")
-                if not access_token:
-                    raise ValidationError("Supabase member Realtime token is unavailable")
                 await asyncio.wait_for(
                     sb.realtime.set_auth(access_token), timeout=2.0,
                 )
             self._channel = sb.channel(
                 f"ab-{self._root}",
-                RealtimeChannelOptions(config={"broadcast": {
-                    "self": False,
-                    "replication_ready": self._observe_ledger,
-                }}))
+                RealtimeChannelOptions(config={
+                    "broadcast": {
+                        "self": False,
+                        "replication_ready": self._observe_ledger,
+                    },
+                    "private": True,
+                }))
             self._channel.on_broadcast("change", lambda _p: self._on_hint())
             if self._observe_ledger:
                 from realtime import RealtimePostgresChangesListenEvent
@@ -2131,10 +2216,22 @@ class _RealtimeThread:
                 timeout=10.0,
             )
             ledger_ready_deadline = time.monotonic() + 10.0
+            token_checked = time.monotonic()
             while not self._closing:
                 await asyncio.sleep(1.0)
                 if self.status() == "disconnected":
                     return
+                if (member_auth and time.monotonic() - token_checked
+                        >= _RT_TOKEN_CHECK_S):
+                    # Realtime re-checks the policies on each new token and
+                    # disconnects when the old one expires.
+                    token_checked = time.monotonic()
+                    fresh = await asyncio.to_thread(self._token_source)
+                    if fresh and fresh != access_token:
+                        await asyncio.wait_for(
+                            sb.realtime.set_auth(fresh), timeout=2.0,
+                        )
+                        access_token = fresh
                 if (self._observe_ledger and not self._ledger_ready.is_set()
                         and time.monotonic() >= ledger_ready_deadline):
                     self._mark_disconnected()
@@ -2173,6 +2270,11 @@ class _RealtimeThread:
     def status(self) -> str:
         with self._state_lock:
             return self._state
+
+    def refused(self) -> bool:
+        """Whether the server refused the join for authorization."""
+        with self._state_lock:
+            return self._refused
 
     def observes_change_ledger(self) -> bool:
         return self._observe_ledger

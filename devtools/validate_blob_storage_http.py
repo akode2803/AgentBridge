@@ -4,6 +4,13 @@
 The script never prints passwords, tokens or the publishable key.  Run
 ``identities`` first, prepare/seal a disposable root for the returned user IDs,
 then run ``acceptance`` with that root and protocol epoch.
+
+``listing`` checks what the janitor's purge depends on: the production
+``SupabaseTransport.list_blobs`` walk over real Storage HTTP (past 100 names,
+into nested folders), RLS-filtered removes answering an empty success, and
+batched removes of 100 keys. It needs a root where both users are members of
+``--chat`` (sealed or not; Storage is outside the seal), and cleans up after
+itself.
 """
 
 from __future__ import annotations
@@ -247,9 +254,117 @@ def _acceptance(
                 raise GateFailure("Storage API cleanup did not remove exact object")
 
 
+LISTING_FILES = 150
+LISTING_STAGED = 3
+
+
+def _janitor_listing(bucket: Any, root: str, chat: str) -> list[str]:
+    """The janitor's three folders, walked by the production list_blobs."""
+    from types import SimpleNamespace
+
+    from agentbridge.transport.supabase import SupabaseTransport
+
+    transport = SimpleNamespace(root=root, _retry=lambda fn: fn(),
+                                _store=lambda: bucket)
+    found: set[str] = set()
+    for folder in (f"chats/{chat}", f"chats/{chat}/files", f"blob-stage/{chat}"):
+        found.update(SupabaseTransport.list_blobs(transport, folder))
+    return sorted(found)
+
+
+def _remove_batched(bucket: Any, root: str, paths: list[str]) -> list[int]:
+    """Remove in calls of 100 keys, as the bound janitor does; rows per call."""
+    keys = [f"{root}/{path}" for path in paths]
+    return [len(bucket.remove(keys[at:at + 100]))
+            for at in range(0, len(keys), 100)]
+
+
+def _listing(
+    owner: Principal,
+    reader: Principal,
+    *,
+    root: str,
+    chat: str,
+) -> dict[str, Any]:
+    owner_bucket = owner.client.storage.from_(BUCKET)
+    reader_bucket = reader.client.storage.from_(BUCKET)
+    chat_paths = sorted(
+        [f"chats/{chat}/files/f{i:03d}" for i in range(LISTING_FILES)]
+        + [f"chats/{chat}/avatar.png", f"chats/{chat}/odd/deep/x"])
+    staged_paths = sorted(f"blob-stage/{chat}/{uuid4().hex}"
+                          for _ in range(LISTING_STAGED))
+    options = {"content-type": "application/octet-stream", "upsert": "false"}
+    uploaded_chat: list[str] = []
+    uploaded_staged: list[str] = []
+    try:
+        for path in chat_paths:
+            owner_bucket.upload(f"{root}/{path}", secrets.token_bytes(16), options)
+            uploaded_chat.append(path)
+        for path in staged_paths:
+            reader_bucket.upload(f"{root}/{path}", secrets.token_bytes(16), options)
+            uploaded_staged.append(path)
+
+        owner_sees = _janitor_listing(owner_bucket, root, chat)
+        reader_sees = _janitor_listing(reader_bucket, root, chat)
+        if owner_sees != chat_paths:
+            raise GateFailure("owner listing differs from the uploaded room files")
+        if reader_sees != sorted(chat_paths + staged_paths):
+            raise GateFailure("uploader listing differs from its visible objects")
+
+        parent = f"{root}/chats/{chat}/files"
+        exact = [row for row in owner_bucket.list(
+            parent, {"limit": 100, "offset": 0, "search": "f105"})
+            if row.get("name") == "f105" and row.get("id") is not None]
+        if len(exact) != 1:
+            raise GateFailure("exact-name search missed a file past the first page")
+
+        # Another member's unpublished staged objects are invisible to the
+        # owner, so its remove must be an empty success that changes nothing.
+        hidden_remove = _remove_batched(owner_bucket, root, staged_paths)
+        if hidden_remove != [0]:
+            raise GateFailure("RLS-hidden remove did not answer an empty success")
+        if _janitor_listing(reader_bucket, root, chat) != reader_sees:
+            raise GateFailure("RLS-hidden remove changed the uploader's objects")
+
+        chat_remove = _remove_batched(owner_bucket, root, chat_paths)
+        if chat_remove != [100, len(chat_paths) - 100]:
+            raise GateFailure("batched remove did not report every removed key")
+        uploaded_chat = []
+        staged_remove = _remove_batched(reader_bucket, root, staged_paths)
+        if staged_remove != [LISTING_STAGED]:
+            raise GateFailure("uploader remove did not report its staged keys")
+        uploaded_staged = []
+        if _janitor_listing(owner_bucket, root, chat) or _janitor_listing(
+                reader_bucket, root, chat):
+            raise GateFailure("listing is not empty after the batched removes")
+
+        return {
+            "mode": "listing",
+            "result": "passed",
+            "root": root,
+            "chat": chat,
+            "owner_id": str(owner.user_id),
+            "reader_id": str(reader.user_id),
+            "room_objects": len(chat_paths),
+            "staged_objects": len(staged_paths),
+            "owner_listed": len(owner_sees),
+            "reader_listed": len(reader_sees),
+            "exact_search_past_first_page": True,
+            "rls_hidden_remove_rows": hidden_remove,
+            "batched_remove_rows": chat_remove,
+            "staged_remove_rows": staged_remove,
+            "empty_after_remove": True,
+        }
+    finally:
+        if uploaded_chat:
+            _remove_batched(owner_bucket, root, uploaded_chat)
+        if uploaded_staged:
+            _remove_batched(reader_bucket, root, uploaded_staged)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("identities", "acceptance"))
+    parser.add_argument("mode", choices=("identities", "acceptance", "listing"))
     parser.add_argument("--root")
     parser.add_argument("--protocol-epoch", type=UUID)
     parser.add_argument("--chat", default="room")
@@ -267,6 +382,10 @@ def main() -> int:
     )
     if args.mode == "identities":
         result = _identities(owner, reader)
+    elif args.mode == "listing":
+        if not args.root:
+            parser.error("listing requires --root")
+        result = _listing(owner, reader, root=args.root, chat=args.chat)
     else:
         if not args.root or args.protocol_epoch is None:
             parser.error("acceptance requires --root and --protocol-epoch")

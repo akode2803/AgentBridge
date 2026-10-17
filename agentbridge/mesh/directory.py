@@ -12,6 +12,8 @@ transport currently says. This is the single choke point for key trust.
 
 from __future__ import annotations
 
+import copy
+
 from ..core.errors import ValidationError
 from ..core.models import Account, UserKind
 from ..transport.base import Transport
@@ -30,7 +32,9 @@ class Directory:
         self.store = store
 
     def _raw_get(self, name: str) -> Account | None:
-        doc = self.tx.get_doc(P.user(name))
+        return self._account(name, self.tx.get_doc(P.user(name)))
+
+    def _account(self, name: str, doc) -> Account | None:
         if not isinstance(doc, dict):
             return None
         acc = Account.from_dict(doc)
@@ -43,7 +47,9 @@ class Directory:
         return acc
 
     def get(self, name: str) -> Account | None:
-        acc = self._raw_get(name)
+        return self._resolved(name, self._raw_get(name))
+
+    def _resolved(self, name: str, acc: Account | None) -> Account | None:
         if acc is None:
             return None
         try:
@@ -129,7 +135,24 @@ class Directory:
 
     def patch(self, name: str, apply) -> Account:
         """Read-merge-write on an account doc (single writer in practice:
-        the account's own machine, or its owner's)."""
+        the account's own machine, or its owner's).
+
+        A bound typed writer instead compare-and-swaps a fresh observation;
+        ``apply`` must then be repeatable (it may run again on conflict)."""
+        from ..transport.local_mutations import LocalMutationTransport
+
+        if isinstance(self.tx, LocalMutationTransport) and self.tx._bound_writer() is not None:
+            def build(current):
+                if not isinstance(current, dict):
+                    raise ValidationError(f"unknown user @{name}")
+                doc = copy.deepcopy(current)
+                apply(doc)
+                return doc
+
+            document, _changed = self.tx.update_doc(P.user(name), build)
+            # The mirror may not show a typed write yet; resolve the exact
+            # document this swap produced, through pins and lifecycle.
+            return self._resolved(name, self._account(name, document))
         doc = self.tx.get_doc(P.user(name))
         if not isinstance(doc, dict):
             raise ValidationError(f"unknown user @{name}")

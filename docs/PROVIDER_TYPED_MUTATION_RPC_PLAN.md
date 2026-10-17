@@ -462,9 +462,20 @@ lease-bound `sent` tombstone before consuming/releasing its root tickets. Consum
 slots remain through Store deletion and are reaped only after that exact registered
 Store no longer contains the owner row. A restarted worker drains sent cleanup
 before new sends. Missing or stale rows never authorize allocation. Startup still
-does not enable this path. Fresh terminal delete/leave events remain unavailable
-until their cleanup/refold owner is migrated; snapshots never stand in for a
-committed typed receipt.
+does not enable this path. Terminal delete/leave events do not use the outbox:
+the `meta_append` family (below) logs them with the swap that ends the actor's
+access; snapshots never stand in for a committed typed receipt.
+
+The `meta_append` family (2026-10-14) is a conditional `meta.json` swap plus
+1..256 of the actor's records appended to one log in array order, in one
+transaction, under actor key-share, exclusive chat and shared ledger locks.
+Anyone in the chat's tenure gets an answer: only a current member of the
+exact pre-swap version swaps, and everyone else gets the same terminal
+`applied=false` whatever the version, so the answer reveals nothing about the
+chat after they left. It never creates a meta or
+replaces a tombstone, and replay precedes authority, so a member who left
+still recovers the exact receipt. Every typed membership action except genesis uses it
+(PROVIDER_ADMISSION_CHECKPOINT.md "Terminal flows", DECISIONS.md D-017).
 
 Store cache-only writes retain NORMAL synchronization. All outbox enqueue variants
 and typed sent/finalize transitions use scoped FULL synchronization, since a
@@ -497,10 +508,15 @@ Remaining lifecycle owners require real durable sequencing, not only operation I
   wraps before dispatch. `on_members_added` needs a bounded durable cursor over
   historical epochs and conditional per-document updates, so partial fanout
   resumes without rewrapping or losing concurrent recipients.
+  (Implemented 2026-10-14, inactive: see PROVIDER_ADMISSION_CHECKPOINT.md
+  "Chat-key rotation owner".)
 - `delete_agent` and `delete_account` must retain dependent membership/lifecycle
   steps and keys until outcomes settle. Swallowed leave failures cannot justify
   deactivation or private-key deletion. Membership genesis/refolding and fresh
   terminal outbox events still need their own forward-only phase reducers.
+  (Membership genesis, actions and refold implemented 2026-10-14, inactive,
+  meta first: see PROVIDER_ADMISSION_CHECKPOINT.md "Membership owner".
+  Terminal events remain.)
 - Reserved read acknowledgement currently retains its callback/payload only in
   process memory. Bind canonical finalization provenance, the semantic action
   and its exact ticket in the same root-to-node-to-Store cut; enqueueing a fresh
@@ -562,3 +578,9 @@ when the epoch rotates. Increasing budgets, regenerating IDs or treating epoch
 closure as an authority/outcome verdict is not a repair. Implement and validate
 effect-free recoverable admission (or equivalent durable exact negative evidence)
 before production writer activation and stack consolidation.
+
+Refined 2026-10-13 (Option B, PROVIDER_ADMISSION_CHECKPOINT.md): closure alone
+is still not a verdict, but closure combined with this journal's enforced
+durable-receipt-before-ACK rule is exact non-effect evidence for *ticketed*
+attempts without a receipt. Admission remains for multi-leg/private owners;
+untracked opaque rows still fail closed.

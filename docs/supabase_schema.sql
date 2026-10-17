@@ -134,6 +134,10 @@ create table if not exists public.ab_members (
   unique (root, uid)
 );
 alter table public.ab_members enable row level security;
+-- A name is never freed (docs/NAME_RETENTION_AND_PRIVATE_POKES.md): leaving
+-- sets revoked_at instead of deleting the row, so the name stays taken and
+-- the login keeps no access. Null means active.
+alter table public.ab_members add column if not exists revoked_at timestamptz;
 
 -- SECURITY DEFINER: these run inside policies over the very tables they
 -- read — without definer they'd recurse through RLS. Owned by the schema
@@ -141,7 +145,8 @@ alter table public.ab_members enable row level security;
 create or replace function public.ab_member(p_root text) returns text
 language sql stable security definer set search_path = public as $$
   select coalesce((select username from public.ab_members
-                   where root = p_root and uid = (select auth.uid())), '')
+                   where root = p_root and uid = (select auth.uid())
+                     and revoked_at is null), '')
 $$;
 revoke all on function public.ab_member(text) from public;
 grant execute on function public.ab_member(text) to authenticated;
@@ -176,10 +181,14 @@ $$;
 revoke all on function public.ab_is_member(text, text) from public;
 grant execute on function public.ab_is_member(text, text) to authenticated;
 
--- A deleted room has no current members, but its former members must still be
--- able to observe the terminal meta/log evidence and perform bounded janitor
--- cleanup. This is read/delete authority only; insert/update policies continue
--- to use ab_is_member, so terminal rooms cannot receive new content.
+-- A deleted room has no current members, but the members it had when it was
+-- deleted (its final_members, written by the deleting client's fold) must
+-- still be able to observe the terminal meta/log evidence and perform bounded
+-- janitor cleanup. People who had left before the deletion may not (D-018). A
+-- deletion by an older client carries no final_members; then its tenure (all
+-- past members) decides. This is read/delete authority only; insert/update
+-- policies continue to use ab_is_member, so terminal rooms cannot receive new
+-- content. One lookup: every chat-path policy calls this per row.
 create or replace function public.ab_can_read_chat(p_root text, p_chat text)
 returns boolean
 language sql stable security definer set search_path = public as $$
@@ -191,13 +200,30 @@ language sql stable security definer set search_path = public as $$
         m.data->'members' ? public.ab_member(p_root)
         or (
           m.data @> '{"deleted": true}'::jsonb
-          and m.data->'tenure' ? public.ab_member(p_root)
+          and case
+            when m.data ? 'final_members'
+            then pg_catalog.jsonb_typeof(m.data->'final_members') = 'array'
+                 and m.data->'final_members' ? public.ab_member(p_root)
+            else m.data->'tenure' ? public.ab_member(p_root)
+          end
         )
       )
   )
 $$;
 revoke all on function public.ab_can_read_chat(text, text) from public;
 grant execute on function public.ab_can_read_chat(text, text) to authenticated;
+
+-- Of those, the ones who are not current members: a deleted room's final
+-- members. Its staged attachments are theirs to list and remove before the
+-- purge (no other principal may touch another uploader's staged object).
+create or replace function public.ab_chat_terminal_reader(p_root text, p_chat text)
+returns boolean
+language sql stable security definer set search_path = public as $$
+  select public.ab_can_read_chat(p_root, p_chat)
+    and not public.ab_is_member(p_root, p_chat)
+$$;
+revoke all on function public.ab_chat_terminal_reader(text, text) from public;
+grant execute on function public.ab_chat_terminal_reader(text, text) to authenticated;
 
 -- Discover candidate chat ids while bypassing row-by-row RLS over every log
 -- and document, then apply the same current-member/deleted-tenure authority
@@ -235,9 +261,10 @@ grant execute on function public.ab_chat_ids(text)
 -- ab_members: SELF-claim on insert — your own uid, an unclaimed username
 -- (the PK is the arbiter, first come first served, mirroring the app
 -- directory's rule); one identity per uid per root (unique root+uid).
--- You may remove yourself; removing OTHERS is the owner's act (service
--- key), so a hostile member can't evict the mesh. Members see their
--- root's roster; outsiders see nothing.
+-- Rows are never deleted (the name-retention section near the end of this
+-- file): leaving is the typed member_leave, eviction is the operator's
+-- revoke, and both set revoked_at. Members see their root's roster;
+-- outsiders and revoked logins see nothing.
 drop policy if exists ab_members_select on public.ab_members;
 create policy ab_members_select on public.ab_members
 for select to authenticated using (public.ab_root_ok(root));
@@ -247,9 +274,8 @@ drop policy if exists ab_members_claim on public.ab_members;
 create policy ab_members_claim on public.ab_members
 for insert to authenticated with check (uid = (select auth.uid()));
 
+-- The legacy self-delete freed the name for the next claimer; it is gone.
 drop policy if exists ab_members_leave on public.ab_members;
-create policy ab_members_leave on public.ab_members
-for delete to authenticated using (uid = (select auth.uid()));
 
 -- (v2.1's ab_pending queue is retired — account creation is membership;
 -- drop it if an earlier paste created it)
@@ -685,6 +711,7 @@ begin
         ) values (new.root, 'root', '', 'visibility');
       elsif old.data->'members' is distinct from new.data->'members'
          or old.data->'tenure' is distinct from new.data->'tenure'
+         or old.data->'final_members' is distinct from new.data->'final_members'
          or old.data->'deleted' is distinct from new.data->'deleted'
          or old.deleted is distinct from new.deleted then
         insert into public.ab_change_events(
@@ -2128,7 +2155,7 @@ create table if not exists public.ab_mutation_receipts (
   operation_id    uuid not null,
   actor_uid       uuid not null,
   operation_kind  text not null check (operation_kind in (
-    'doc_put','doc_compare_put','reaction_pair','doc_create','doc_delete','log_append','effect_transition',
+    'doc_put','doc_compare_put','reaction_pair','meta_append','doc_create','doc_delete','log_append','effect_transition',
     'chat_delete','member_claim','member_leave','blob_manifest'
   )),
   payload_digest  text not null check (payload_digest ~ '^[0-9a-f]{64}$'),
@@ -2484,6 +2511,9 @@ language sql immutable set search_path = pg_catalog as $$
       and p_operation in ('INSERT', 'UPDATE')
     when 'reaction_pair' then p_table = 'ab_docs'
       and p_operation in ('INSERT', 'UPDATE')
+    when 'meta_append' then
+      (p_table = 'ab_docs' and p_operation = 'UPDATE')
+      or (p_table = 'ab_logs' and p_operation = 'INSERT')
     when 'doc_create' then p_table = 'ab_docs' and p_operation = 'INSERT'
     when 'doc_delete' then p_table = 'ab_docs'
       and p_operation in ('UPDATE', 'DELETE')
@@ -2494,7 +2524,7 @@ language sql immutable set search_path = pg_catalog as $$
       (p_table = 'ab_logs' and p_operation = 'DELETE')
       or (p_table = 'ab_docs' and p_operation in ('UPDATE', 'DELETE'))
     when 'member_claim' then p_table = 'ab_members' and p_operation = 'INSERT'
-    when 'member_leave' then p_table = 'ab_members' and p_operation = 'DELETE'
+    when 'member_leave' then p_table = 'ab_members' and p_operation = 'UPDATE'
     when 'blob_manifest' then p_table = 'ab_blob_manifests'
       and p_operation = 'INSERT'
     else false
@@ -2522,6 +2552,46 @@ $$;
 revoke all on function private.ab_mutation_receipt_json(
   public.ab_mutation_receipts) from public, anon, authenticated, service_role;
 
+-- Prospective owner admission is explicitly disabled until an operator gates a
+-- sealed empty epoch. Every admitted leg holds one receipt slot until rotation;
+-- cancellation never frees capacity early or changes the terminal receipt wire.
+alter table public.ab_mutation_roots
+  add column if not exists admission_required boolean not null default false;
+create table if not exists public.ab_mutation_admission_groups (
+  root text not null references public.ab_mutation_roots(root),
+  protocol_epoch uuid not null,
+  owner_id uuid not null,
+  actor_uid uuid not null,
+  primary key (root, protocol_epoch, owner_id)
+);
+create table if not exists public.ab_mutation_admission_legs (
+  root text not null,
+  protocol_epoch uuid not null,
+  owner_id uuid not null,
+  operation_id uuid not null,
+  ordinal integer not null check (ordinal between 1 and 1025),
+  operation_kind text not null check (operation_kind in (
+    'doc_put','doc_compare_put','reaction_pair','meta_append','doc_create','doc_delete','log_append',
+    'effect_transition','chat_delete','member_claim','member_leave','blob_manifest')),
+  client_digest text not null check (client_digest ~ '^[0-9a-f]{64}$'),
+  receipt_slot integer not null check (receipt_slot between 0 and 4095),
+  cancelled boolean not null default false,
+  cancel_acknowledged boolean not null default false,
+  check (not cancel_acknowledged or cancelled),
+  primary key (root, protocol_epoch, operation_id),
+  unique (root, protocol_epoch, receipt_slot),
+  unique (root, protocol_epoch, owner_id, ordinal),
+  foreign key (root, protocol_epoch, owner_id)
+    references public.ab_mutation_admission_groups(root, protocol_epoch, owner_id)
+    on delete cascade
+);
+alter table public.ab_mutation_admission_groups enable row level security;
+alter table public.ab_mutation_admission_legs enable row level security;
+revoke all on table public.ab_mutation_admission_groups
+  from public, anon, authenticated, service_role;
+revoke all on table public.ab_mutation_admission_legs
+  from public, anon, authenticated, service_role;
+
 create or replace function private.ab_mutation_begin(
   p_root text, p_protocol_epoch uuid, p_operation_id uuid,
   p_operation_kind text, p_payload_digest text, p_provider_digest text
@@ -2535,12 +2605,13 @@ declare
   v_slot integer;
   v_probe integer;
   v_count integer;
+  v_leg record;
 begin
   if p_root is null or p_root = ''
      or pg_catalog.octet_length(p_root) > 1024
      or p_protocol_epoch is null or p_operation_id is null
      or p_operation_kind is null or p_operation_kind not in (
-       'doc_put','doc_compare_put','reaction_pair','doc_create','doc_delete','log_append','effect_transition',
+       'doc_put','doc_compare_put','reaction_pair','meta_append','doc_create','doc_delete','log_append','effect_transition',
        'chat_delete','member_claim','member_leave','blob_manifest'
      )
      or p_payload_digest is null
@@ -2592,16 +2663,50 @@ begin
     );
   end if;
 
+  if v_root.admission_required then
+    -- Admission is optional per owner. Shared, this mutex excludes only an
+    -- admission (held exclusive) from this lookup through commit, so an
+    -- operation is either admitted or receipted unadmitted, never both, and
+    -- admission counts every slot taken here. Order: epoch, operation, mutex.
+    perform pg_catalog.pg_advisory_xact_lock_shared(
+      pg_catalog.hashtextextended('agentbridge-mutation-admission:' || p_root, 0));
+    select l.*, g.actor_uid into v_leg from public.ab_mutation_admission_legs l
+      join public.ab_mutation_admission_groups g using(root, protocol_epoch, owner_id)
+      where l.root = p_root and l.protocol_epoch = p_protocol_epoch and l.operation_id = p_operation_id;
+    if found then
+      -- An admitted operation runs only through its exact uncancelled leg;
+      -- it never falls back to an unadmitted slot.
+      if v_leg.actor_uid is distinct from v_actor
+         or v_leg.operation_kind is distinct from p_operation_kind
+         or v_leg.client_digest is distinct from p_payload_digest or v_leg.cancelled then
+        raise exception 'typed mutation requires matching uncancelled admission' using errcode = '55000';
+      end if;
+      insert into public.ab_mutation_receipts(root, protocol_epoch, operation_id, actor_uid,
+        operation_kind, payload_digest, provider_digest, receipt_slot, receipt_state, applying_xid, result)
+      values (p_root, p_protocol_epoch, p_operation_id, v_actor, p_operation_kind,
+        p_payload_digest, p_provider_digest, v_leg.receipt_slot, 'applying',
+        pg_catalog.pg_current_xact_id(), '{}'::jsonb) returning * into v_receipt;
+      return pg_catalog.jsonb_build_object('replay', false,
+        'receipt', private.ab_mutation_receipt_json(v_receipt));
+    end if;
+  end if;
+
   v_base := (pg_catalog.hashtextextended(p_operation_id::text, 0) & 4095)::integer;
   for v_probe in 0..4095 loop
     v_slot := (v_base + v_probe) % 4096;
     -- Do not accumulate one heavyweight transaction lock per immutable
     -- occupied slot in a near-full epoch.  The first read skips settled rows;
     -- the second closes the race after the nonblocking candidate lock.
+    -- Admitted owners' reserved slots are never taken; they cannot change
+    -- while the shared admission mutex above is held.
     if exists (
       select 1 from public.ab_mutation_receipts r
       where r.root = p_root and r.protocol_epoch = p_protocol_epoch
         and r.receipt_slot = v_slot
+    ) or exists (
+      select 1 from public.ab_mutation_admission_legs l
+      where l.root = p_root and l.protocol_epoch = p_protocol_epoch
+        and l.receipt_slot = v_slot
     ) then
       continue;
     end if;
@@ -2640,9 +2745,14 @@ begin
     end;
   end loop;
 
-  select pg_catalog.count(*) into v_count
-  from public.ab_mutation_receipts r
-  where r.root = p_root and r.protocol_epoch = p_protocol_epoch;
+  -- Reserved admission slots are occupied too; only a free slot held by an
+  -- in-flight writer is contention.
+  select pg_catalog.count(*) into v_count from (
+    select r.receipt_slot from public.ab_mutation_receipts r
+    where r.root = p_root and r.protocol_epoch = p_protocol_epoch
+    union
+    select l.receipt_slot from public.ab_mutation_admission_legs l
+    where l.root = p_root and l.protocol_epoch = p_protocol_epoch) occupied;
   if v_count >= 4096 then
     raise exception 'typed mutation receipt epoch is full'
       using errcode = '54000';
@@ -2980,11 +3090,24 @@ begin
     raise exception 'mutation receipts are not fully acknowledged'
       using errcode = '55000';
   end if;
+  if exists (select 1 from public.ab_mutation_admission_legs l
+      join public.ab_mutation_admission_groups g using(root, protocol_epoch, owner_id)
+      left join public.ab_mutation_receipts r on r.root=l.root
+        and r.protocol_epoch=l.protocol_epoch and r.operation_id=l.operation_id
+      where l.root=p_root and l.protocol_epoch=p_expected_epoch
+        and ((l.cancelled and l.cancel_acknowledged and r.operation_id is null)
+          or (not l.cancelled and r.receipt_state='terminal' and r.acknowledged_at is not null
+            and r.actor_uid=g.actor_uid and r.operation_kind=l.operation_kind
+            and r.payload_digest=l.client_digest and r.receipt_slot=l.receipt_slot)) is not true) then
+    raise exception 'mutation admission legs are not settled and acknowledged' using errcode = '55000';
+  end if;
   if v_root.receipt_generation = 9223372036854775807 then
     raise exception 'mutation epoch generation exhausted' using errcode = '54000';
   end if;
   delete from public.ab_mutation_receipts r
   where r.root = p_root and r.protocol_epoch = p_expected_epoch;
+  delete from public.ab_mutation_admission_groups g
+    where g.root = p_root and g.protocol_epoch = p_expected_epoch;
   v_next_epoch := pg_catalog.gen_random_uuid();
   update public.ab_mutation_roots
   set previous_protocol_epoch = p_expected_epoch,
@@ -3110,9 +3233,11 @@ language plpgsql volatile security definer set search_path = pg_catalog as $$
 declare
   v_member text;
 begin
+  -- A revoked row is no member. A concurrent leave holds FOR UPDATE, so
+  -- this waits for it and then re-checks the revoked row: ''.
   select m.username into v_member
   from public.ab_members m
-  where m.root = p_root and m.uid = auth.uid()
+  where m.root = p_root and m.uid = auth.uid() and m.revoked_at is null
   for key share;
   return coalesce(v_member, '');
 end
@@ -3310,9 +3435,12 @@ begin
       p_root, v_chat, p_path = 'chats/' || v_chat || '/meta.json'
     );
   end if;
+  -- A chat's meta is never tombstoned directly: only chat_delete ends a
+  -- room, so a purge always removes its logs too.
   if v_actor is null or v_member = ''
      or p_path like 'chats/%/runtime/effects/%'
-     or (v_chat <> '' and not public.ab_can_read_chat(p_root, v_chat)) then
+     or (v_chat <> '' and (p_path = 'chats/' || v_chat || '/meta.json'
+                           or not public.ab_can_read_chat(p_root, v_chat))) then
     raise exception 'typed document delete is unauthorized'
       using errcode = '42501';
   end if;
@@ -3483,16 +3611,19 @@ begin
     raise exception 'typed member leave is unauthorized'
       using errcode = '42501';
   end if;
+  -- FOR UPDATE is load-bearing: the revoking UPDATE alone takes FOR NO KEY
+  -- UPDATE, which does not wait for writes in flight holding lock_actor's
+  -- FOR KEY SHARE. Leaving revokes; the row and its name are kept forever.
   select m.username into v_username
   from public.ab_members m
-  where m.root = p_root and m.uid = v_actor
+  where m.root = p_root and m.uid = v_actor and m.revoked_at is null
   for update;
   if v_username is null then
     raise exception 'typed member leave is unauthorized'
       using errcode = '42501';
   end if;
-  delete from public.ab_members m
-  where m.root = p_root and m.uid = v_actor;
+  update public.ab_members m set revoked_at = pg_catalog.now()
+  where m.root = p_root and m.uid = v_actor and m.revoked_at is null;
   if not found then
     raise exception 'typed member leave authority changed'
       using errcode = '55000';
@@ -3519,6 +3650,7 @@ declare
   v_actor uuid := auth.uid();
   v_member text;
   v_meta jsonb;
+  v_purged boolean;
   v_prefix text;
   v_provider_digest text;
   v_begin jsonb;
@@ -3548,18 +3680,28 @@ begin
       using errcode = '42501';
   end if;
   perform private.ab_mutation_lock_chat(p_root, p_chat, true);
-  select d.data into v_meta
+  select d.data, d.deleted into v_meta, v_purged
   from public.ab_docs d
   where d.root = p_root
     and d.path = 'chats/' || p_chat || '/meta.json'
-    and not d.deleted
   for update;
+  if v_purged then
+    -- Already purged (another final member's janitor got there first):
+    -- nothing is left to purge or to authorize against, so every root member
+    -- gets the same empty answer and a lost race settles.
+    return private.ab_mutation_finish(
+      p_root, p_protocol_epoch, p_operation_id, 'chat_delete',
+      p_payload_digest, v_provider_digest,
+      pg_catalog.jsonb_build_object(
+        'chat_id', p_chat, 'logs_deleted', 0, 'documents_tombstoned', 0)
+    );
+  end if;
+  -- Only a deleted room's final members (D-018) purge it.
   if v_meta is null
      or not coalesce(v_meta @> '{"deleted": true}'::jsonb, false)
      or pg_catalog.jsonb_typeof(v_meta->'members') is distinct from 'object'
      or v_meta->'members' is distinct from '{}'::jsonb
-     or pg_catalog.jsonb_typeof(v_meta->'tenure') is distinct from 'object'
-     or not coalesce(v_meta->'tenure' ? v_member, false) then
+     or not public.ab_can_read_chat(p_root, p_chat) then
     raise exception 'typed chat delete is unauthorized'
       using errcode = '42501';
   end if;
@@ -3869,24 +4011,32 @@ declare
   v_actor uuid := auth.uid();
   v_sealed_bytes bigint := private.ab_storage_object_size(p_metadata);
 begin
-  if v_actor is null or p_root is null or p_chat is null or p_blob is null
-     or p_owner_id is null or p_object_id is null
-     or v_sealed_bytes is null then
+  if v_actor is null or p_root is null or p_chat is null or p_blob is null then
     return false;
   end if;
-  if exists (
-    select 1 from public.ab_blob_manifests m
-    where m.root = p_root and m.chat_id = p_chat and m.blob_id = p_blob
-  ) then
-    return public.ab_can_read_chat(p_root, p_chat) and exists (
+  if p_owner_id is not null and p_object_id is not null
+     and v_sealed_bytes is not null then
+    if exists (
       select 1 from public.ab_blob_manifests m
       where m.root = p_root and m.chat_id = p_chat and m.blob_id = p_blob
-        and m.object_id = p_object_id
-        and m.sealed_bytes = v_sealed_bytes
-    );
+    ) then
+      if public.ab_can_read_chat(p_root, p_chat) and exists (
+        select 1 from public.ab_blob_manifests m
+        where m.root = p_root and m.chat_id = p_chat and m.blob_id = p_blob
+          and m.object_id = p_object_id
+          and m.sealed_bytes = v_sealed_bytes
+      ) then
+        return true;
+      end if;
+    elsif p_owner_id = v_actor::text
+          and public.ab_is_member(p_root, p_chat) then
+      return true;
+    end if;
   end if;
-  return p_owner_id = v_actor::text
-    and public.ab_is_member(p_root, p_chat);
+  -- A deleted room's final members see every staged object it holds, so
+  -- their janitor can list and remove them all before the purge. Checked
+  -- last, so a live room's common reads never pay for it.
+  return public.ab_chat_terminal_reader(p_root, p_chat);
 end
 $$;
 revoke all on function public.ab_staged_blob_readable(
@@ -4009,10 +4159,19 @@ for delete to authenticated using (
       and pg_catalog.split_part(name, '/', 3) <> ''
       and pg_catalog.split_part(name, '/', 4) <> ''
       and pg_catalog.split_part(name, '/', 5) = ''
-      and owner_id = auth.uid()::text
-      and public.ab_is_member(
-        pg_catalog.split_part(name, '/', 1),
-        pg_catalog.split_part(name, '/', 3)
+      and (
+        (
+          owner_id = auth.uid()::text
+          and public.ab_is_member(
+            pg_catalog.split_part(name, '/', 1),
+            pg_catalog.split_part(name, '/', 3)
+          )
+        )
+        -- A deleted room's final members clear its staged objects (D-018).
+        or public.ab_chat_terminal_reader(
+          pg_catalog.split_part(name, '/', 1),
+          pg_catalog.split_part(name, '/', 3)
+        )
       )
     )
   )
@@ -4138,7 +4297,7 @@ alter table public.ab_mutation_receipts
 alter table public.ab_mutation_receipts
   add constraint ab_mutation_receipts_operation_kind_check check (
     operation_kind in (
-      'doc_put','doc_compare_put','reaction_pair','doc_create','doc_delete','log_append',
+      'doc_put','doc_compare_put','reaction_pair','meta_append','doc_create','doc_delete','log_append',
       'effect_transition','chat_delete','member_claim','member_leave','blob_manifest'
     )
   );
@@ -4340,3 +4499,614 @@ revoke all on function public.ab_mutation_reaction_pair(
 grant execute on function public.ab_mutation_reaction_pair(
   text,uuid,uuid,text,text,text,jsonb,jsonb,uuid,bigint,boolean,bigint,boolean)
   to authenticated;
+
+-- Effect-free immutable owner admission, optional per owner: single-leg
+-- writes may take free slots directly. Lock order is epoch, then operation,
+-- then the root admission mutex. Admission holds the mutex exclusive and never
+-- takes an operation lock; execution in an admission-enabled epoch holds it
+-- shared after its operation lock; cancellation never takes it. No cycle.
+create or replace function public.ab_admin_enable_mutation_admission(
+  p_root text, p_expected_epoch uuid
+) returns jsonb
+language plpgsql volatile security invoker set search_path = pg_catalog as $$
+declare
+  v_root public.ab_mutation_roots%rowtype;
+begin
+  if p_root is null or p_root = '' or pg_catalog.octet_length(p_root) > 1024
+     or p_expected_epoch is null
+     or pg_catalog.current_setting('transaction_isolation') <> 'read committed' then
+    raise exception 'invalid admission enable request' using errcode = '22023';
+  end if;
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('agentbridge-mutation-epoch:' || p_root, 0));
+  select r.* into v_root from public.ab_mutation_roots r where r.root = p_root for update;
+  if v_root.root is null or v_root.protocol_epoch is distinct from p_expected_epoch
+     or v_root.legacy_writes_enabled
+     or not exists (select 1 from public.ab_database_mutation_seals s where s.root = p_root) then
+    raise exception 'admission enable precondition changed' using errcode = '55000';
+  end if;
+  if not v_root.admission_required then
+    if exists (select 1 from public.ab_mutation_receipts r where r.root = p_root)
+       or exists (select 1 from public.ab_mutation_admission_groups g where g.root = p_root)
+       or exists (select 1 from public.ab_mutation_admission_legs l where l.root = p_root) then
+      raise exception 'admission requires an empty receipt epoch' using errcode = '55000';
+    end if;
+    update public.ab_mutation_roots set admission_required = true where root = p_root;
+  end if;
+  return pg_catalog.jsonb_build_object('schema_version', 1, 'root', p_root,
+    'protocol_epoch', p_expected_epoch, 'admission_required', true);
+end
+$$;
+revoke all on function public.ab_admin_enable_mutation_admission(text,uuid)
+  from public, anon, authenticated, service_role;
+
+create or replace function public.ab_admit_mutation_owner(
+  p_root text, p_protocol_epoch uuid, p_owner_id uuid, p_plan jsonb
+) returns jsonb
+language plpgsql volatile security definer set search_path = pg_catalog as $$
+declare
+  v_actor uuid := auth.uid();
+  v_root public.ab_mutation_roots%rowtype;
+  v_group public.ab_mutation_admission_groups%rowtype;
+  v_item jsonb;
+  v_plan jsonb;
+  v_ids uuid[] := array[]::uuid[];
+  v_id uuid;
+  v_count integer;
+  v_occupied integer;
+  v_ordinal integer := 0;
+  v_slots integer[];
+  v_member text;
+begin
+  if v_actor is null or auth.role() is distinct from 'authenticated'
+     or p_root is null or p_root = '' or pg_catalog.octet_length(p_root) > 1024
+     or p_protocol_epoch is null or p_owner_id is null
+     or p_plan is null or pg_catalog.jsonb_typeof(p_plan) <> 'array'
+     or pg_catalog.octet_length(p_plan::text) > 524288
+     or pg_catalog.current_setting('transaction_isolation') <> 'read committed' then
+    raise exception 'invalid mutation admission request' using errcode = '22023';
+  end if;
+  v_count := pg_catalog.jsonb_array_length(p_plan);
+  if v_count < 1 or v_count > 1025 then
+    raise exception 'invalid admission plan count' using errcode = '22023';
+  end if;
+  for v_item in select value from pg_catalog.jsonb_array_elements(p_plan) loop
+    if pg_catalog.jsonb_typeof(v_item) <> 'object'
+       or not (v_item ?& array['operation_id','kind','client_digest'])
+       or (v_item - array['operation_id','kind','client_digest']) <> '{}'::jsonb
+       or pg_catalog.jsonb_typeof(v_item->'operation_id') <> 'string'
+       or pg_catalog.jsonb_typeof(v_item->'kind') <> 'string'
+       or pg_catalog.jsonb_typeof(v_item->'client_digest') <> 'string'
+       or (v_item->>'kind') not in (
+         'doc_put','doc_compare_put','reaction_pair','meta_append','doc_create','doc_delete','log_append',
+         'effect_transition','chat_delete','member_claim','member_leave','blob_manifest')
+       or (v_item->>'client_digest') !~ '^[0-9a-f]{64}$' then
+      raise exception 'invalid admission plan leg' using errcode = '22023';
+    end if;
+    begin
+      v_id := (v_item->>'operation_id')::uuid;
+    exception when invalid_text_representation then
+      raise exception 'invalid admission operation id' using errcode = '22023';
+    end;
+    if v_id::text is distinct from (v_item->>'operation_id') or v_id = any(v_ids) then
+      raise exception 'noncanonical or repeated admission operation id' using errcode = '22023';
+    end if;
+    v_ids := pg_catalog.array_append(v_ids, v_id);
+  end loop;
+  perform pg_catalog.pg_advisory_xact_lock_shared(
+    pg_catalog.hashtextextended('agentbridge-mutation-epoch:' || p_root, 0));
+  select r.* into v_root from public.ab_mutation_roots r where r.root = p_root;
+  if v_root.root is null or v_root.protocol_epoch is distinct from p_protocol_epoch
+     or not v_root.admission_required or v_root.legacy_writes_enabled then
+    raise exception 'mutation admission epoch unavailable' using errcode = '55000';
+  end if;
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('agentbridge-mutation-admission:' || p_root, 0));
+  select g.* into v_group from public.ab_mutation_admission_groups g
+    where g.root = p_root and g.protocol_epoch = p_protocol_epoch and g.owner_id = p_owner_id;
+  if found then
+    select pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+        'operation_id', l.operation_id, 'kind', l.operation_kind, 'client_digest', l.client_digest)
+        order by l.ordinal) into v_plan
+      from public.ab_mutation_admission_legs l
+      where l.root = p_root and l.protocol_epoch = p_protocol_epoch and l.owner_id = p_owner_id;
+    if v_group.actor_uid is distinct from v_actor or v_plan is distinct from p_plan then
+      raise exception 'mutation admission owner collision' using errcode = '55000';
+    end if;
+    return pg_catalog.jsonb_build_object('schema_version', 1, 'root', p_root,
+      'actor_id', v_actor, 'protocol_epoch', p_protocol_epoch, 'owner_id', p_owner_id,
+      'status', 'admitted', 'plan', v_plan);
+  end if;
+  -- Fresh admission is authorization, but exact admitted replay is not: it
+  -- remains available to the original actor after root membership removal.
+  v_member := private.ab_mutation_lock_actor(p_root);
+  -- A nonmember may reserve exactly the existing authenticated member-claim
+  -- operation; this adds no source authority and preserves the join RPC's
+  -- current authorization/uniqueness checks at execution. No mixed plan.
+  if (v_member is null or v_member = '')
+     and not (v_count = 1 and p_plan->0->>'kind' = 'member_claim') then
+    raise exception 'mutation admission requires root membership' using errcode = '42501';
+  end if;
+  -- An unaffiliated principal must pin no more capacity than one direct claim
+  -- could before admission existed: one reservation not yet settled for epoch
+  -- closure at a time, and a small claim total per epoch. Without this, one
+  -- Auth account could reserve every slot and block rotation indefinitely.
+  -- The admission mutex serializes this check with every other admission.
+  if v_member is null or v_member = '' then
+    if exists (select 1 from public.ab_mutation_admission_legs l
+        join public.ab_mutation_admission_groups g using(root, protocol_epoch, owner_id)
+        left join public.ab_mutation_receipts r on r.root = l.root
+          and r.protocol_epoch = l.protocol_epoch and r.operation_id = l.operation_id
+        where l.root = p_root and l.protocol_epoch = p_protocol_epoch
+          and g.actor_uid = v_actor
+          and not (l.cancelled and l.cancel_acknowledged)
+          and not (r.receipt_state = 'terminal' and r.acknowledged_at is not null)) then
+      raise exception 'unaffiliated mutation admission is already pending' using errcode = '55000';
+    end if;
+    if (select pg_catalog.count(*) from public.ab_mutation_admission_legs l
+        join public.ab_mutation_admission_groups g using(root, protocol_epoch, owner_id)
+        where l.root = p_root and l.protocol_epoch = p_protocol_epoch
+          and g.actor_uid = v_actor and l.operation_kind = 'member_claim') >= 4 then
+      raise exception 'unaffiliated mutation admission budget exhausted' using errcode = '54000';
+    end if;
+  end if;
+  -- An operation that already executed unadmitted can never settle a new leg.
+  if exists (select 1 from public.ab_mutation_admission_legs l
+      where l.root = p_root and l.protocol_epoch = p_protocol_epoch and l.operation_id = any(v_ids))
+     or exists (select 1 from public.ab_mutation_receipts r
+      where r.root = p_root and r.protocol_epoch = p_protocol_epoch and r.operation_id = any(v_ids)) then
+    raise exception 'mutation admission operation collision' using errcode = '55000';
+  end if;
+  -- Admission is optional per owner: single-leg writes may take free slots
+  -- directly. Occupancy is every reserved or receipted slot; neither table
+  -- ever frees a slot within the epoch, so a counted full is final.
+  select pg_catalog.count(*) into v_occupied from (
+    select l.receipt_slot from public.ab_mutation_admission_legs l
+      where l.root = p_root and l.protocol_epoch = p_protocol_epoch
+    union
+    select r.receipt_slot from public.ab_mutation_receipts r
+      where r.root = p_root and r.protocol_epoch = p_protocol_epoch) occupied;
+  if v_occupied + v_count > 4096 then
+    -- No control row is needed: no source effect is eligible without positive
+    -- durable admission. Slots, including cancelled legs, never free in-epoch.
+    return pg_catalog.jsonb_build_object('schema_version', 1, 'root', p_root,
+      'actor_id', v_actor, 'protocol_epoch', p_protocol_epoch, 'owner_id', p_owner_id,
+      'status', 'full', 'plan', p_plan);
+  end if;
+  -- Unadmitted writes hold this mutex shared from their leg lookup through
+  -- commit, so under the exclusive hold no unadmitted receipt is in flight.
+  select pg_catalog.array_agg(candidate order by candidate) into v_slots from (
+    select slot as candidate from pg_catalog.generate_series(0,4095) as slot
+    where not exists (select 1 from public.ab_mutation_admission_legs l
+      where l.root = p_root and l.protocol_epoch = p_protocol_epoch and l.receipt_slot = slot)
+      and not exists (select 1 from public.ab_mutation_receipts r
+      where r.root = p_root and r.protocol_epoch = p_protocol_epoch and r.receipt_slot = slot)
+    order by slot limit v_count
+  ) free_slots;
+  insert into public.ab_mutation_admission_groups(root, protocol_epoch, owner_id, actor_uid)
+    values (p_root, p_protocol_epoch, p_owner_id, v_actor);
+  for v_item in select value from pg_catalog.jsonb_array_elements(p_plan) loop
+    v_ordinal := v_ordinal + 1;
+    insert into public.ab_mutation_admission_legs(root, protocol_epoch, owner_id,
+      operation_id, ordinal, operation_kind, client_digest, receipt_slot)
+    values (p_root, p_protocol_epoch, p_owner_id, (v_item->>'operation_id')::uuid,
+      v_ordinal, v_item->>'kind', v_item->>'client_digest', v_slots[v_ordinal]);
+  end loop;
+  return pg_catalog.jsonb_build_object('schema_version', 1, 'root', p_root,
+    'actor_id', v_actor, 'protocol_epoch', p_protocol_epoch, 'owner_id', p_owner_id,
+    'status', 'admitted', 'plan', p_plan);
+end
+$$;
+revoke all on function public.ab_admit_mutation_owner(text,uuid,uuid,jsonb)
+  from public, anon, authenticated, service_role;
+grant execute on function public.ab_admit_mutation_owner(text,uuid,uuid,jsonb) to authenticated;
+
+-- Shared exact cancellation resolver. It updates an existing leg, never
+-- allocates a control slot, and serializes with _begin on the operation lock.
+create or replace function private.ab_mutation_admission_cancel(
+  p_root text, p_protocol_epoch uuid, p_owner_id uuid, p_operation_id uuid,
+  p_kind text, p_client_digest text, p_acknowledge boolean
+) returns jsonb
+language plpgsql volatile security definer set search_path = pg_catalog as $$
+declare
+  v_actor uuid := auth.uid();
+  v_leg public.ab_mutation_admission_legs%rowtype;
+  v_status text;
+begin
+  if v_actor is null or auth.role() is distinct from 'authenticated'
+     or p_root is null or p_root = '' or pg_catalog.octet_length(p_root) > 1024
+     or p_protocol_epoch is null or p_owner_id is null or p_operation_id is null
+     or p_kind is null or p_client_digest is null
+     or p_client_digest !~ '^[0-9a-f]{64}$' or p_acknowledge is null
+     or pg_catalog.current_setting('transaction_isolation') <> 'read committed' then
+    raise exception 'invalid admission cancellation request' using errcode = '22023';
+  end if;
+  perform pg_catalog.pg_advisory_xact_lock_shared(
+    pg_catalog.hashtextextended('agentbridge-mutation-epoch:' || p_root, 0));
+  if not exists (select 1 from public.ab_mutation_roots r where r.root = p_root
+      and r.protocol_epoch = p_protocol_epoch and r.admission_required and not r.legacy_writes_enabled) then
+    raise exception 'mutation admission epoch unavailable' using errcode = '55000';
+  end if;
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    'agentbridge-mutation-operation:' || p_root || ':' || p_protocol_epoch::text || ':' || p_operation_id::text, 0));
+  select l.* into v_leg from public.ab_mutation_admission_legs l
+    join public.ab_mutation_admission_groups g using(root, protocol_epoch, owner_id)
+    where l.root = p_root and l.protocol_epoch = p_protocol_epoch and l.owner_id = p_owner_id
+      and l.operation_id = p_operation_id and g.actor_uid = v_actor;
+  if not found or v_leg.operation_kind is distinct from p_kind
+     or v_leg.client_digest is distinct from p_client_digest then
+    raise exception 'mutation admission leg unavailable' using errcode = '55000';
+  end if;
+  if p_acknowledge then
+    if not v_leg.cancelled then
+      raise exception 'mutation admission leg is not cancelled' using errcode = '55000';
+    end if;
+    update public.ab_mutation_admission_legs set cancel_acknowledged = true
+      where root = p_root and protocol_epoch = p_protocol_epoch and operation_id = p_operation_id;
+    v_status := 'cancelled';
+  elsif exists (select 1 from public.ab_mutation_receipts r
+      where r.root = p_root and r.protocol_epoch = p_protocol_epoch and r.operation_id = p_operation_id) then
+    v_status := 'executed';
+  else
+    update public.ab_mutation_admission_legs set cancelled = true
+      where root = p_root and protocol_epoch = p_protocol_epoch and operation_id = p_operation_id;
+    v_status := 'cancelled';
+  end if;
+  return pg_catalog.jsonb_build_object('schema_version', 1, 'root', p_root,
+    'actor_id', v_actor, 'protocol_epoch', p_protocol_epoch, 'owner_id', p_owner_id,
+    'operation_id', p_operation_id, 'kind', p_kind, 'client_digest', p_client_digest,
+    'status', v_status);
+end
+$$;
+revoke all on function private.ab_mutation_admission_cancel(text,uuid,uuid,uuid,text,text,boolean)
+  from public, anon, authenticated, service_role;
+
+create or replace function public.ab_cancel_mutation_admission(
+  p_root text, p_protocol_epoch uuid, p_owner_id uuid, p_operation_id uuid,
+  p_kind text, p_client_digest text
+) returns jsonb
+language sql volatile security definer set search_path = pg_catalog as $$
+  select private.ab_mutation_admission_cancel(p_root,p_protocol_epoch,p_owner_id,
+    p_operation_id,p_kind,p_client_digest,false)
+$$;
+revoke all on function public.ab_cancel_mutation_admission(text,uuid,uuid,uuid,text,text)
+  from public, anon, authenticated, service_role;
+grant execute on function public.ab_cancel_mutation_admission(text,uuid,uuid,uuid,text,text) to authenticated;
+
+create or replace function public.ab_ack_mutation_admission_cancel(
+  p_root text, p_protocol_epoch uuid, p_owner_id uuid, p_operation_id uuid,
+  p_kind text, p_client_digest text
+) returns boolean
+language plpgsql volatile security definer set search_path = pg_catalog as $$
+begin
+  perform private.ab_mutation_admission_cancel(p_root,p_protocol_epoch,p_owner_id,
+    p_operation_id,p_kind,p_client_digest,true);
+  return true;
+end
+$$;
+revoke all on function public.ab_ack_mutation_admission_cancel(text,uuid,uuid,uuid,text,text)
+  from public, anon, authenticated, service_role;
+grant execute on function public.ab_ack_mutation_admission_cancel(text,uuid,uuid,uuid,text,text) to authenticated;
+
+-- Inactive atomic membership write: a conditional chat meta.json replacement
+-- and the actor's signed membership events, appended to one log in array
+-- order, commit together or not at all. Authority is the CURRENT (pre-swap)
+-- meta, exactly as for doc_compare_put and log_append, so a member who leaves
+-- or deletes the chat still records the event that removes their access.
+-- This grants nothing those two families do not: any member may already
+-- replace the meta and append to a log of the chat. It never creates a meta
+-- or replaces a tombstoned one. Anyone in the chat's tenure (a current or
+-- former member) gets an answer: only a current member of the exact version
+-- swaps, and everyone else gets the same terminal applied=false whatever
+-- version they send. So an attempt that lost a race to its own removal, or to
+-- the group's deletion, settles instead of being refused until an epoch
+-- closure, and the answer tells a former member nothing about the chat since
+-- they left (whether its meta changed, or when). Others are refused, except
+-- once the room is purged (its meta row tombstoned): then every root member
+-- gets that applied=false, so a former member cannot learn of the purge.
+alter table public.ab_mutation_admission_legs
+  drop constraint if exists ab_mutation_admission_legs_operation_kind_check;
+alter table public.ab_mutation_admission_legs
+  add constraint ab_mutation_admission_legs_operation_kind_check check (
+    operation_kind in (
+      'doc_put','doc_compare_put','reaction_pair','meta_append','doc_create',
+      'doc_delete','log_append','effect_transition','chat_delete','member_claim',
+      'member_leave','blob_manifest'
+    )
+  );
+
+create or replace function public.ab_mutation_meta_append(
+  p_root text, p_protocol_epoch uuid, p_operation_id uuid,
+  p_payload_digest text, p_chat text, p_data jsonb,
+  p_expected_source_epoch uuid, p_expected_seq bigint, p_expected_deleted boolean,
+  p_log text, p_records jsonb
+) returns jsonb
+language plpgsql volatile security definer set search_path = pg_catalog as $$
+declare
+  v_actor uuid := auth.uid();
+  v_member text;
+  v_provider_digest text;
+  v_begin jsonb;
+  v_source_epoch uuid;
+  v_record jsonb;
+  v_bytes bigint;
+  v_meta jsonb;
+  v_seq bigint;
+  v_deleted boolean;
+  v_applied boolean := false;
+begin
+  if not private.ab_mutation_path_valid(p_chat, 1024, 1)
+     or not private.ab_mutation_path_valid(p_log, 4096, 32)
+     or p_data is null
+     or pg_catalog.jsonb_typeof(p_data) <> 'object'
+     or p_records is null
+     or pg_catalog.jsonb_typeof(p_records) <> 'array'
+     or pg_catalog.jsonb_array_length(p_records) not between 1 and 256
+     or p_expected_source_epoch is null
+     or p_expected_seq is null or p_expected_seq < 1
+     or p_expected_deleted is distinct from false then
+    raise exception 'invalid meta append' using errcode = '22023';
+  end if;
+  v_bytes := public.ab_source_json_bytes(p_data);
+  for v_record in select r.value from pg_catalog.jsonb_array_elements(p_records) r loop
+    if pg_catalog.jsonb_typeof(v_record) <> 'object' then
+      raise exception 'invalid meta append' using errcode = '22023';
+    end if;
+    v_bytes := v_bytes + public.ab_source_text_bytes(v_record::text);
+  end loop;
+  if v_bytes > 8355840 then
+    raise exception 'invalid meta append' using errcode = '22023';
+  end if;
+  v_provider_digest := private.ab_mutation_provider_digest(
+    pg_catalog.jsonb_build_array('meta_append', p_chat, p_data,
+      p_expected_source_epoch, p_expected_seq, p_expected_deleted,
+      p_log, p_records)
+  );
+  if not private.ab_mutation_root_sealed(p_root) then
+    raise exception 'typed mutation root is not sealed' using errcode = '55000';
+  end if;
+  v_begin := private.ab_mutation_begin(
+    p_root, p_protocol_epoch, p_operation_id, 'meta_append',
+    p_payload_digest, v_provider_digest
+  );
+  if (v_begin->>'replay')::boolean then
+    return v_begin->'receipt';
+  end if;
+  -- Same lock order as doc_compare_put on a meta path and chat_delete.
+  v_member := private.ab_mutation_lock_actor(p_root);
+  perform private.ab_mutation_lock_chat(p_root, p_chat, true);
+  select d.data, d.seq, d.deleted into v_meta, v_seq, v_deleted
+  from public.ab_docs d
+  where d.root = p_root and d.path = 'chats/' || p_chat || '/meta.json';
+  -- Tenure (current or former member) earns an answer; see the header. So
+  -- does every root member once the room is purged: nothing is left to tell
+  -- former members from others, and a refusal would reveal the purge to them.
+  if v_actor is null or v_member = '' or v_meta is null
+     or not (v_deleted or coalesce(v_meta->'members' ? v_member
+                                   or v_meta->'tenure' ? v_member, false)) then
+    raise exception 'meta append is unauthorized' using errcode = '42501';
+  end if;
+  perform pg_catalog.pg_advisory_xact_lock_shared(
+    pg_catalog.hashtextextended('agentbridge-change-ledger:' || p_root, 0)
+  );
+  select e.epoch into v_source_epoch from public.ab_change_epochs e
+  where e.root = p_root and e.source_schema_version = 2;
+  -- Only a current member of the exact version swaps; for anyone else in the
+  -- tenure the answer is applied=false whatever the version (see the header).
+  if v_source_epoch = p_expected_source_epoch and v_seq = p_expected_seq
+     and v_deleted = p_expected_deleted
+     and public.ab_is_member(p_root, p_chat) then
+    update public.ab_docs d set data = p_data, deleted = false
+    where d.root = p_root and d.path = 'chats/' || p_chat || '/meta.json'
+      and d.seq = p_expected_seq and d.deleted = p_expected_deleted;
+    v_applied := found;
+    if v_applied then
+      for v_record in
+        select r.value from pg_catalog.jsonb_array_elements(p_records)
+          with ordinality r(value, ordinal)
+        order by r.ordinal
+      loop
+        insert into public.ab_logs(root, chat_id, log_name, line)
+        values (p_root, p_chat, p_log, v_record::text);
+      end loop;
+    end if;
+  end if;
+  return private.ab_mutation_finish(
+    p_root, p_protocol_epoch, p_operation_id, 'meta_append',
+    p_payload_digest, v_provider_digest,
+    pg_catalog.jsonb_build_object('chat_id', p_chat, 'log_name', p_log,
+                                 'applied', v_applied)
+  );
+end
+$$;
+revoke all on function public.ab_mutation_meta_append(
+  text,uuid,uuid,text,text,jsonb,uuid,bigint,boolean,text,jsonb)
+  from public, anon, authenticated, service_role;
+grant execute on function public.ab_mutation_meta_append(
+  text,uuid,uuid,text,text,jsonb,uuid,bigint,boolean,text,jsonb)
+  to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- Name retention and the private poke channel (2026-10-17). Idempotent;
+-- paste and Run. Design: docs/NAME_RETENTION_AND_PRIVATE_POKES.md.
+--
+-- A name is held by an ab_members row (a login), by a users/<name>.json row
+-- (an account, human or agent), or by both. Rows of both kinds are kept
+-- forever, and the two tables agree on who owns a name, so no login can
+-- inherit chat access by claiming a name someone else used or uses.
+
+alter table public.ab_members add column if not exists revoked_at timestamptz;
+-- Declared since R84, but a database built another way may lack it, and
+-- the trigger below compares it.
+alter table public.ab_members
+  add column if not exists added_at timestamptz not null default now();
+
+-- Every role, the service role included: no delete; username, uid and
+-- added_at are fixed; revoked_at only goes from null to a time. The database
+-- owner can still remove a row by disabling this trigger on purpose.
+create or replace function private.ab_members_keep_names()
+returns trigger language plpgsql set search_path = pg_catalog as $$
+begin
+  if tg_op = 'DELETE' then
+    raise exception 'a claimed name is never freed; revoke it instead'
+      using errcode = '55000';
+  end if;
+  if new.username is distinct from old.username
+     or new.uid is distinct from old.uid
+     or new.added_at is distinct from old.added_at then
+    raise exception 'member identity is immutable' using errcode = '22023';
+  end if;
+  if old.revoked_at is not null
+     and new.revoked_at is distinct from old.revoked_at then
+    raise exception 'a revoked name stays revoked' using errcode = '55000';
+  end if;
+  return new;
+end
+$$;
+revoke all on function private.ab_members_keep_names()
+  from public, anon, authenticated, service_role;
+drop trigger if exists ab_members_keep_names on public.ab_members;
+create trigger ab_members_keep_names
+before update or delete on public.ab_members for each row
+execute function private.ab_members_keep_names();
+
+-- One transaction lock per (root, name), taken by both triggers below
+-- before they look, so a claim and an account creation for the same name
+-- cannot both pass under READ COMMITTED.
+create or replace function private.ab_lock_name(p_root text, p_name text)
+returns void language sql volatile set search_path = pg_catalog as $$
+  select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    'agentbridge-name:' || pg_catalog.jsonb_build_array(p_root, p_name)::text,
+    0))
+$$;
+revoke all on function private.ab_lock_name(text, text)
+  from public, anon, authenticated, service_role;
+
+-- A login may not claim a name that belongs to an account (an agent, or a
+-- human whose doc exists), live or tombstoned. A row this login or name
+-- already has falls through to the unique constraints, which refuse it as
+-- before, so "already yours" stays recognisable. Definer: a not-yet-member
+-- cannot read ab_docs. The service role and the database owner are exempt
+-- (the operator's seed; the legacy service-key fleet).
+create or replace function private.ab_members_one_owner()
+returns trigger language plpgsql security definer set search_path = pg_catalog as $$
+begin
+  perform private.ab_lock_name(new.root, new.username);
+  if coalesce(auth.role(), '') in ('', 'service_role') then
+    return new;
+  end if;
+  if exists (
+    select 1 from public.ab_members m
+    where m.root = new.root and (m.uid = new.uid or m.username = new.username)
+  ) then
+    return new;
+  end if;
+  if exists (
+    select 1 from public.ab_docs d
+    where d.root = new.root and d.path = 'users/' || new.username || '.json'
+  ) then
+    raise exception 'name belongs to an existing account'
+      using errcode = '55000';
+  end if;
+  return new;
+end
+$$;
+revoke all on function private.ab_members_one_owner()
+  from public, anon, authenticated, service_role;
+drop trigger if exists ab_members_one_owner on public.ab_members;
+create trigger ab_members_one_owner
+before insert on public.ab_members for each row
+execute function private.ab_members_one_owner();
+
+-- An account doc may not be created for a name another login holds. A
+-- human's own doc passes (their login holds the name), and so does a new
+-- agent's (no login holds it). An upsert fires this too, which is cheap.
+create or replace function private.ab_docs_one_owner()
+returns trigger language plpgsql security definer set search_path = pg_catalog as $$
+declare
+  v_name text;
+begin
+  if new.path !~ '^users/[^/]+\.json$' then
+    return new;
+  end if;
+  v_name := pg_catalog.substr(new.path, 7, pg_catalog.length(new.path) - 11);
+  perform private.ab_lock_name(new.root, v_name);
+  if coalesce(auth.role(), '') in ('', 'service_role') then
+    return new;
+  end if;
+  if exists (
+    select 1 from public.ab_members m
+    where m.root = new.root and m.username = v_name
+      and m.uid is distinct from auth.uid()
+  ) then
+    raise exception 'name is claimed by another login'
+      using errcode = '55000';
+  end if;
+  return new;
+end
+$$;
+revoke all on function private.ab_docs_one_owner()
+  from public, anon, authenticated, service_role;
+drop trigger if exists ab_docs_one_owner on public.ab_docs;
+create trigger ab_docs_one_owner
+before insert on public.ab_docs for each row
+when (new.path like 'users/%')
+execute function private.ab_docs_one_owner();
+
+-- Account rows outlive everything: a hard delete of a users/ row is skipped
+-- (the row stays, no error), for every role. Skipping rather than raising
+-- keeps an older client's bulk tombstone purge working for every other row.
+-- Soft deletes (deleted = true) are updates and still work.
+create or replace function private.ab_docs_keep_accounts()
+returns trigger language plpgsql set search_path = pg_catalog as $$
+begin
+  return null;
+end
+$$;
+revoke all on function private.ab_docs_keep_accounts()
+  from public, anon, authenticated, service_role;
+drop trigger if exists ab_docs_keep_accounts on public.ab_docs;
+create trigger ab_docs_keep_accounts
+before delete on public.ab_docs for each row
+when (old.path like 'users/%')
+execute function private.ab_docs_keep_accounts();
+
+-- The poke channel ab-<root> is private: only active members of the root
+-- may join (receive) or send. Roots may contain '-', so the topic is never
+-- split; the root is everything after the 'ab-' prefix. Supabase also needs
+-- "Allow public access" turned off in the Realtime settings.
+create or replace function public.ab_poke_topic_ok(p_topic text)
+returns boolean language sql stable set search_path = pg_catalog as $$
+  select coalesce(
+    pg_catalog.left(p_topic, 3) = 'ab-'
+    and pg_catalog.length(p_topic) > 3
+    and public.ab_root_ok(pg_catalog.substr(p_topic, 4)),
+    false)
+$$;
+revoke all on function public.ab_poke_topic_ok(text) from public, anon;
+grant execute on function public.ab_poke_topic_ok(text) to authenticated;
+
+do $realtime$
+begin
+  -- Plain PostgreSQL (the CI gate) has no Realtime schema.
+  if pg_catalog.to_regclass('realtime.messages') is null then
+    return;
+  end if;
+  execute 'drop policy if exists ab_poke_receive on realtime.messages';
+  execute $policy$
+    create policy ab_poke_receive on realtime.messages
+    for select to authenticated using (
+      realtime.messages.extension = 'broadcast'
+      and (select public.ab_poke_topic_ok((select realtime.topic())))
+    )
+  $policy$;
+  execute 'drop policy if exists ab_poke_send on realtime.messages';
+  execute $policy$
+    create policy ab_poke_send on realtime.messages
+    for insert to authenticated with check (
+      realtime.messages.extension = 'broadcast'
+      and (select public.ab_poke_topic_ok((select realtime.topic())))
+    )
+  $policy$;
+end
+$realtime$;

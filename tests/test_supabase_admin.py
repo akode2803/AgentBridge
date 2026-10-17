@@ -73,9 +73,49 @@ def test_member_self_service_auth_lookup_uses_one_init_plan_per_statement():
     assert "with check (uid = (select auth.uid()))" in _policy(
         sql, "ab_members_claim",
     )
-    assert "using (uid = (select auth.uid()))" in _policy(
-        sql, "ab_members_leave",
+    # The legacy self-delete freed the name for the next claimer.
+    assert "create policy ab_members_leave" not in sql
+    assert "drop policy if exists ab_members_leave" in sql
+
+
+def test_names_are_never_freed_and_have_one_owner():
+    """docs/NAME_RETENTION_AND_PRIVATE_POKES.md: the schema keeps every
+    claimed name, refuses claims over accounts, and keeps account rows."""
+    sql = (Path(__file__).parents[1] / "docs" / "supabase_schema.sql").read_text(
+        encoding="utf-8",
     )
+    member = sql[sql.index("create or replace function public.ab_member("):]
+    assert "and revoked_at is null" in member[:member.index("$$;")]
+    lock = sql[sql.rindex("create or replace function private.ab_mutation_lock_actor"):]
+    assert "m.revoked_at is null" in lock[:lock.index("$$;")]
+    leave = sql[sql.rindex("create or replace function public.ab_mutation_member_leave"):]
+    leave = leave[:leave.index("$$;")]
+    assert "delete from public.ab_members" not in leave
+    assert "set revoked_at = pg_catalog.now()" in leave
+    assert "for update" in leave
+    assert ("when 'member_leave' then p_table = 'ab_members' "
+            "and p_operation = 'UPDATE'") in sql
+    for trigger in ("ab_members_keep_names", "ab_members_one_owner",
+                    "ab_docs_one_owner", "ab_docs_keep_accounts"):
+        assert f"create trigger {trigger}" in sql
+    assert "when (old.path like 'users/%')" in sql
+    assert "'agentbridge-name:'" in sql
+
+
+def test_poke_channel_policies_parse_the_topic_without_splitting():
+    sql = (Path(__file__).parents[1] / "docs" / "supabase_schema.sql").read_text(
+        encoding="utf-8",
+    )
+    topic = sql[sql.index("create or replace function public.ab_poke_topic_ok"):]
+    topic = topic[:topic.index("$$;")]
+    assert "pg_catalog.left(p_topic, 3) = 'ab-'" in topic
+    assert "pg_catalog.substr(p_topic, 4)" in topic
+    assert "split_part" not in topic
+    for name in ("ab_poke_receive", "ab_poke_send"):
+        body = sql.split(f"create policy {name}", 1)[1].split("$policy$", 1)[0]
+        assert "realtime.messages.extension = 'broadcast'" in body
+        assert "(select public.ab_poke_topic_ok((select realtime.topic())))" in body
+    assert "pg_catalog.to_regclass('realtime.messages') is null" in sql
 
 
 class _Table:
@@ -114,7 +154,8 @@ class _Table:
 
 class _Client:
     def __init__(self, *, signup_user=True, signup_session=True,
-                 claim_error="", signin_ok=False):
+                 claim_error="", signin_ok=False, uid="uid-123"):
+        self.uid = uid
         self.rows: list[dict] = []
         self.signups: list[dict] = []
         self.signins: list[dict] = []
@@ -127,7 +168,7 @@ class _Client:
 
     def _sign_up(self, creds):
         self.signups.append(creds)
-        user = SimpleNamespace(id="uid-123") if self._signup_user else None
+        user = SimpleNamespace(id=self.uid) if self._signup_user else None
         session = (SimpleNamespace(user=user)
                    if self._signup_session and user else None)
         return SimpleNamespace(user=user, session=session)
@@ -136,7 +177,7 @@ class _Client:
         self.signins.append(creds)
         if not self._signin_ok:
             raise RuntimeError("invalid login credentials")
-        return SimpleNamespace(user=SimpleNamespace(id="uid-123"))
+        return SimpleNamespace(user=SimpleNamespace(id=self.uid))
 
     def table(self, name):
         assert name == "ab_members"
@@ -152,6 +193,12 @@ def _patch(monkeypatch, client):
     import supabase as sb_mod
 
     monkeypatch.setattr(sb_mod, "create_client", lambda url, key: client)
+
+
+@pytest.fixture(autouse=True)
+def unsealed_root(monkeypatch):
+    """The legacy tests run against an unsealed root; typed tests opt out."""
+    monkeypatch.setattr(admin, "_sealed_claim", lambda *a, **k: "unsealed")
 
 
 def test_join_signs_up_claims_and_installs(tmp_path, monkeypatch):
@@ -229,7 +276,9 @@ def test_join_explains_an_orphaned_auth_user(tmp_path, monkeypatch):
 
     with pytest.raises(SystemExit) as e:
         admin.join_mesh(_env(), "ben", "mesh2", tmp_path / "supabase.env")
-    assert "revoke" in str(e.value)
+    # A lost password is replaced by seed; revoke would burn the name.
+    assert "supabase_admin seed ben" in str(e.value)
+    assert "never reused" in str(e.value)
 
 
 def test_join_explains_a_refused_signup(tmp_path, monkeypatch):
@@ -239,3 +288,220 @@ def test_join_explains_a_refused_signup(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as e:
         admin.join_mesh(_env(), "ben", "mesh2", tmp_path / "supabase.env")
     assert "email signup enabled" in str(e.value)
+
+
+# ------------------------------------------------------------ sealed roots
+_TYPED_CLAIM = admin._sealed_claim
+
+
+@pytest.fixture
+def sealed(monkeypatch):
+    """Route the claim through a real typed RPC over a fake member session."""
+    from test_member_claim import ACTOR, URL, _Client as _RpcClient
+
+    from agentbridge.transport import member_claim
+    from agentbridge.transport.supabase import SupabaseTransport
+    from agentbridge.transport.typed_mutations import TypedMutationRPC
+
+    monkeypatch.setattr(admin, "_sealed_claim", _TYPED_CLAIM)
+    rpc_client = _RpcClient()
+    opened = []
+
+    def open_member_rpc(env, root, actor_id):
+        opened.append((dict(env), root, actor_id))
+        provider = SupabaseTransport(root, env={"SUPABASE_URL": URL}, client=rpc_client)
+        provider.auth_mode = "member:" + env["SUPABASE_MEMBER_EMAIL"].split("@")[0]
+        return TypedMutationRPC(provider, actor_id=actor_id, root=root, endpoint=URL)
+
+    monkeypatch.setattr(member_claim, "open_member_rpc", open_member_rpc)
+    monkeypatch.setattr(member_claim.time, "sleep", lambda _s: None)
+    return SimpleNamespace(actor=ACTOR, rpc=rpc_client, opened=opened)
+
+
+def test_sealed_join_claims_typed_after_installing_the_credential(
+        tmp_path, monkeypatch, sealed, capsys):
+    client = _Client(uid=sealed.actor)
+    _patch(monkeypatch, client)
+    env_path = tmp_path / "supabase.env"
+    installed = []
+    real_open = admin._sealed_claim
+
+    def spy(*args, **kwargs):
+        installed.append(env_path.read_text(encoding="utf-8"))
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(admin, "_sealed_claim", spy)
+    admin.join_mesh(_env(SUPABASE_SECRET_KEY="service"), "ben", "mesh2", env_path)
+
+    pw = client.signups[0]["password"]
+    assert f"SUPABASE_MEMBER_PASSWORD={pw}" in installed[0]
+    env, root, actor = sealed.opened[0]
+    assert (root, actor) == ("mesh2", sealed.actor)
+    assert "SUPABASE_SECRET_KEY" not in env          # the member acts alone
+    assert env["SUPABASE_MEMBER_PASSWORD"] == pw
+    assert sealed.rpc.members == {("mesh2", "ben"): sealed.actor}
+    assert len(sealed.rpc.acked) == 1
+    assert client.rows == []                          # no legacy insert
+    assert "@ben joined mesh2" in capsys.readouterr().out
+
+
+def test_sealed_join_rerun_after_success_is_idempotent(tmp_path, monkeypatch, sealed):
+    client = _Client(uid=sealed.actor, signin_ok=True)
+    _patch(monkeypatch, client)
+    env_path = tmp_path / "supabase.env"
+    creds = dict(SUPABASE_MEMBER_EMAIL="ben@mesh2.agentbridge.local",
+                 SUPABASE_MEMBER_PASSWORD="kept-pw")
+    admin.join_mesh(_env(**creds), "ben", "mesh2", env_path)
+    admin.join_mesh(_env(**creds), "ben", "mesh2", env_path)
+    assert client.signups == []
+    assert sealed.rpc.effects == 1
+    claims = [a for n, a in sealed.rpc.calls if n == "ab_mutation_member_claim"]
+    assert len({a["p_operation_id"] for a in claims}) == 1
+
+
+def test_sealed_join_reports_a_name_taken_and_keeps_the_credential(
+        tmp_path, monkeypatch, sealed):
+    client = _Client(uid=sealed.actor)
+    _patch(monkeypatch, client)
+    sealed.rpc.members[("mesh2", "ben")] = "someone-else"
+    env_path = tmp_path / "supabase.env"
+    with pytest.raises(SystemExit) as e:
+        admin.join_mesh(_env(), "ben", "mesh2", env_path)
+    assert "someone else" in str(e.value)
+    assert "SUPABASE_MEMBER_PASSWORD=" in env_path.read_text(encoding="utf-8")
+
+
+def test_sealed_join_unknown_outcome_says_rerun(tmp_path, monkeypatch, sealed):
+    client = _Client(uid=sealed.actor)
+    _patch(monkeypatch, client)
+    sealed.rpc.faults["ab_mutation_member_claim"] = [ConnectionError("x")] * 4
+    with pytest.raises(SystemExit) as e:
+        admin.join_mesh(_env(), "ben", "mesh2", tmp_path / "supabase.env")
+    assert "rerun join" in str(e.value)
+
+
+class _AdminTable:
+    """``error`` fails the writes; ``rows`` answers the name lookup."""
+
+    def __init__(self, error="", rows=()):
+        self.error = error
+        self.rows = list(rows)
+        self.calls = []
+        self._op = ""
+
+    def select(self, columns):
+        self._op = "select"
+        return self
+
+    def upsert(self, row):
+        self.calls.append(("upsert", row))
+        self._op = "upsert"
+        return self
+
+    def update(self, row):
+        self.calls.append(("update", row))
+        self._op = "update"
+        return self
+
+    def delete(self):
+        self.calls.append(("delete",))
+        self._op = "delete"
+        return self
+
+    def eq(self, *_args):
+        return self
+
+    def is_(self, *_args):
+        return self
+
+    def execute(self):
+        if self._op == "select":
+            return SimpleNamespace(data=self.rows)
+        if self.error:
+            raise RuntimeError(self.error)
+        return SimpleNamespace(data=[])
+
+
+def _admin_client(table, uid):
+    deleted = []
+    auth_admin = SimpleNamespace(
+        list_users=lambda page, per_page: [],
+        create_user=lambda data: SimpleNamespace(user=SimpleNamespace(id=uid)),
+        delete_user=deleted.append)
+    return SimpleNamespace(auth=SimpleNamespace(admin=auth_admin),
+                           table=lambda name: table, deleted=deleted)
+
+
+def test_sealed_seed_claims_as_the_minted_member(monkeypatch, sealed):
+    table = _AdminTable()
+    _patch(monkeypatch, _admin_client(table, sealed.actor))
+    email, password = admin.seed(_env(SUPABASE_SECRET_KEY="service"), "ben", "mesh2")
+    env, root, actor = sealed.opened[0]
+    assert (env["SUPABASE_MEMBER_EMAIL"], env["SUPABASE_MEMBER_PASSWORD"]) == (email, password)
+    assert "SUPABASE_SECRET_KEY" not in env
+    assert sealed.rpc.members == {("mesh2", "ben"): sealed.actor}
+    assert table.calls == []                          # no service-key write
+
+
+def test_sealed_seed_without_publishable_key_explains(monkeypatch):
+    table = _AdminTable("legacy provider writes are sealed")
+    _patch(monkeypatch, _admin_client(table, "uid-1"))
+    with pytest.raises(SystemExit) as e:
+        admin.seed({"SUPABASE_URL": "https://x.supabase.co",
+                    "SUPABASE_SECRET_KEY": "service"}, "ben", "mesh2")
+    assert "SUPABASE_PUBLISHABLE_KEY" in str(e.value)
+
+
+def test_sealed_revoke_refuses_before_deleting_the_auth_user(monkeypatch):
+    table = _AdminTable("legacy provider writes are sealed")
+    client = _admin_client(table, "uid-1")
+    _patch(monkeypatch, client)
+    with pytest.raises(SystemExit) as e:
+        admin.revoke({"SUPABASE_URL": "https://x.supabase.co",
+                      "SUPABASE_SECRET_KEY": "service"}, "ben", "mesh2")
+    assert "sealed" in str(e.value)
+    assert client.deleted == []
+
+
+def test_seed_refuses_a_revoked_name(monkeypatch):
+    table = _AdminTable(rows=[{"uid": "uid-1", "revoked_at": "2026-10-17T00:00:00Z"}])
+    _patch(monkeypatch, _admin_client(table, "uid-1"))
+    with pytest.raises(SystemExit) as e:
+        admin.seed({"SUPABASE_URL": "https://x.supabase.co",
+                    "SUPABASE_SECRET_KEY": "service"}, "ben", "mesh2")
+    assert "never reused" in str(e.value)
+    assert table.calls == []
+
+
+def test_seed_refuses_a_name_held_by_another_login(monkeypatch):
+    table = _AdminTable(rows=[{"uid": "uid-old", "revoked_at": None}])
+    _patch(monkeypatch, _admin_client(table, "uid-new"))
+    with pytest.raises(SystemExit) as e:
+        admin.seed({"SUPABASE_URL": "https://x.supabase.co",
+                    "SUPABASE_SECRET_KEY": "service"}, "ben", "mesh2")
+    assert "another login" in str(e.value)
+    assert table.calls == []
+
+
+def test_revoke_marks_the_row_instead_of_deleting(monkeypatch):
+    table = _AdminTable()
+    client = _admin_client(table, "uid-1")
+    _patch(monkeypatch, client)
+    admin.revoke({"SUPABASE_URL": "https://x.supabase.co",
+                  "SUPABASE_SECRET_KEY": "service"}, "ben", "mesh2")
+    assert [call[0] for call in table.calls] == ["update"]
+    assert set(table.calls[0][1]) == {"revoked_at"}
+
+
+def test_revoke_requires_explicit_permanence(tmp_path, monkeypatch, capsys):
+    called = []
+    monkeypatch.setattr(admin, "revoke", lambda *args: called.append(args))
+    monkeypatch.setattr(admin, "load_supabase_env", lambda home: {})
+    with pytest.raises(SystemExit):
+        admin.main(["--root", "supabase://mesh2", "--home", str(tmp_path),
+                    "revoke", "ben"])
+    assert called == []
+    assert "--permanent" in capsys.readouterr().err
+    admin.main(["--root", "supabase://mesh2", "--home", str(tmp_path),
+                "revoke", "ben", "--permanent"])
+    assert called == [({}, "ben", "mesh2")]

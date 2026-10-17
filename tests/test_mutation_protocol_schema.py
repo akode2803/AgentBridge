@@ -283,7 +283,7 @@ def test_p1b_lifecycle_rpcs_bind_receipts_before_exact_effects():
         effect = min(
             value for value in (
                 body.find("insert into public.ab_members", replay),
-                body.find("delete from public.ab_members", replay),
+                body.find("update public.ab_members", replay),
                 body.find("delete from public.ab_logs", replay),
             ) if value >= 0
         )
@@ -319,12 +319,17 @@ def test_p1b_lifecycle_authority_is_self_bound_and_terminal_exact():
     assert "and not d.deleted" in delete
     assert delete.index("private.ab_mutation_lock_actor(p_root)") < \
         delete.index("private.ab_mutation_lock_chat(p_root, p_chat, true)") < \
-        delete.index("select d.data into v_meta")
+        delete.index("select d.data, d.deleted into v_meta, v_purged")
+    # An already-purged room settles a lost race with the same empty answer
+    # for every root member; otherwise only its final members purge (D-018).
+    purged = delete.index("if v_purged then")
+    empty = delete.index("'logs_deleted', 0, 'documents_tombstoned', 0")
+    authority = delete.index("or not public.ab_can_read_chat(p_root, p_chat) then")
+    assert purged < empty < authority < delete.index("delete from public.ab_logs l")
     assert "v_meta @> '{\"deleted\": true}'::jsonb" in delete
     assert "v_meta->'members' is distinct from '{}'::jsonb" in delete
     assert "jsonb_typeof(v_meta->'members') is distinct from 'object'" in delete
-    assert "jsonb_typeof(v_meta->'tenure') is distinct from 'object'" in delete
-    assert "v_meta->'tenure' ? v_member" in delete
+    assert "v_meta->'tenure'" not in delete
     assert "pg_catalog.left(d.path, pg_catalog.length(v_prefix)) = v_prefix" \
         in delete
     assert "d.path like" not in delete.lower()
@@ -443,8 +448,9 @@ def test_p1b_staged_read_predicate_fails_closed_after_any_manifest():
         "revoke all on function public.ab_staged_blob_readable(",
     )
     any_manifest = helper.index("if exists (")
-    exact_manifest = helper.index("return public.ab_can_read_chat", any_manifest)
-    owner_fallback = helper.index("return p_owner_id = v_actor::text")
+    exact_manifest = helper.index("if public.ab_can_read_chat", any_manifest)
+    # The owner fallback is the else branch of "any manifest exists".
+    owner_fallback = helper.index("elsif p_owner_id = v_actor::text")
     assert any_manifest < exact_manifest < owner_fallback
     assert "m.object_id = p_object_id" in helper
     assert "m.sealed_bytes = v_sealed_bytes" in helper
@@ -600,3 +606,223 @@ def test_reaction_pair_rolls_back_both_documents_and_retains_conflict_receipt():
     grant = SCHEMA[SCHEMA.index('revoke all on function public.ab_mutation_reaction_pair('):]
     assert 'from public, anon, authenticated, service_role' in grant
     assert 'to authenticated' in grant
+
+
+def test_meta_append_swaps_meta_and_appends_records_atomically():
+    body = _last_body(
+        'create or replace function public.ab_mutation_meta_append(',
+        'revoke all on function public.ab_mutation_meta_append(')
+    validate = body.index("raise exception 'invalid meta append'")
+    replay = body.index("if (v_begin->>'replay')::boolean")
+    actor = body.index('v_member := private.ab_mutation_lock_actor')
+    chat_lock = body.index('perform private.ab_mutation_lock_chat(p_root, p_chat, true)')
+    observed = body.index('select d.data, d.seq, d.deleted into v_meta, v_seq, v_deleted')
+    tenure = body.index("or not (v_deleted or coalesce(v_meta->'members' ? v_member\n"
+                        "                                   or v_meta->'tenure' ? v_member, false))")
+    source_lock = body.index("'agentbridge-change-ledger:'")
+    compare = body.index('if v_source_epoch = p_expected_source_epoch and v_seq = p_expected_seq\n'
+                         '     and v_deleted = p_expected_deleted\n'
+                         '     and public.ab_is_member(p_root, p_chat) then')
+    update = body.index('and d.seq = p_expected_seq and d.deleted = p_expected_deleted')
+    applied = body.index('if v_applied then')
+    append = body.index('insert into public.ab_logs(root, chat_id, log_name, line)')
+    finish = body.index('return private.ab_mutation_finish')
+    # Tenure earns an answer; only a current member of the exact pre-swap
+    # version swaps, and every other tenure answer is the same applied=false
+    # (a race lost to one's own removal settles; nothing leaks about later
+    # versions); records land only with an applied swap.
+    assert validate < replay < actor < chat_lock < observed < tenure < source_lock
+    assert source_lock < compare < update < applied < append < finish
+    assert "v_member = '' or v_meta is null" in body
+    assert body.count("raise exception 'meta append is unauthorized'") == 1
+    assert body.count('ab_is_member') == 1
+    assert "d.path = 'chats/' || p_chat || '/meta.json'" in body
+    assert 'on conflict' not in body and 'insert into public.ab_docs' not in body
+    assert 'p_expected_seq < 1' in body
+    assert 'p_expected_deleted is distinct from false' in body
+    assert 'jsonb_array_length(p_records) not between 1 and 256' in body
+    assert 'with ordinality r(value, ordinal)' in body and 'order by r.ordinal' in body
+    assert 'v_bytes > 8355840' in body
+    assert "'meta_append', p_chat, p_data," in body
+    assert 'p_log, p_records)' in body
+    assert "'chat_id', p_chat, 'log_name', p_log," in body
+    permits = _last_body('create or replace function private.ab_mutation_kind_permits(',
+                         'revoke all on function private.ab_mutation_kind_permits(')
+    clause = permits[permits.index("when 'meta_append'"):permits.index("when 'doc_create'")]
+    assert "p_table = 'ab_docs' and p_operation = 'UPDATE'" in clause
+    assert "p_table = 'ab_logs' and p_operation = 'INSERT'" in clause
+    assert "'DELETE'" not in clause and "ab_members" not in clause
+    for kinds in (SCHEMA[SCHEMA.index('create or replace function private.ab_mutation_begin('):],
+                  SCHEMA[SCHEMA.rindex('add constraint ab_mutation_receipts_operation_kind_check'):],
+                  SCHEMA[SCHEMA.rindex('add constraint ab_mutation_admission_legs_operation_kind_check'):]):
+        assert "'meta_append'" in kinds[:1200]
+    grant = SCHEMA[SCHEMA.index('revoke all on function public.ab_mutation_meta_append('):]
+    assert 'from public, anon, authenticated, service_role' in grant
+    assert 'to authenticated' in grant
+
+
+def test_deleted_rooms_are_readable_only_by_their_final_members():
+    read = _body('create or replace function public.ab_can_read_chat(',
+                 'revoke all on function public.ab_can_read_chat(')
+    # One lookup (every chat-path policy calls it per row): current members,
+    # or a deleted room's final members; older deletions fall back to tenure.
+    assert read.count('select 1 from public.ab_docs m') == 1
+    assert 'terminal_reader' not in read and 'ab_is_member' not in read
+    final = read.index("when m.data ? 'final_members'")
+    assert read.index("m.data @> '{\"deleted\": true}'::jsonb") < final
+    assert final < read.index("jsonb_typeof(m.data->'final_members') = 'array'") \
+        < read.index("m.data->'final_members' ? public.ab_member(p_root)") \
+        < read.index("else m.data->'tenure' ? public.ab_member(p_root)")
+    terminal = _body('create or replace function public.ab_chat_terminal_reader(',
+                     'revoke all on function public.ab_chat_terminal_reader(')
+    assert ('public.ab_can_read_chat(p_root, p_chat)\n'
+            '    and not public.ab_is_member(p_root, p_chat)') in terminal
+    assert 'grant execute on function public.ab_chat_terminal_reader(text, text) ' \
+        'to authenticated' in SCHEMA
+    staged = _last_body('create or replace function public.ab_staged_blob_readable(',
+                        'revoke all on function public.ab_staged_blob_readable(')
+    # Checked last: a live room's published and own staged reads never pay
+    # for it, and a mismatched or unpublished object of a dead room is still
+    # the final members' to remove.
+    assert staged.count('ab_chat_terminal_reader') == 1
+    assert staged.index('select 1 from public.ab_blob_manifests m') \
+        < staged.index("elsif p_owner_id = v_actor::text") \
+        < staged.index('return public.ab_chat_terminal_reader(p_root, p_chat);\nend')
+    delete = _body('create or replace function public.ab_mutation_doc_delete(',
+                   'revoke all on function public.ab_mutation_doc_delete(')
+    refusal = delete[delete.index('if v_actor is null'):delete.index("raise exception 'typed "
+                                                                     "document delete")]
+    assert "(p_path = 'chats/' || v_chat || '/meta.json'\n" in refusal
+    policy = SCHEMA[SCHEMA.rindex('create policy ab_blobs_member_delete on storage.objects'):]
+    policy = policy[:policy.index(');\n') + 3]
+    stage = policy[policy.index("pg_catalog.split_part(name, '/', 2) = 'blob-stage'"):]
+    assert "owner_id = auth.uid()::text" in stage
+    assert "or public.ab_chat_terminal_reader(" in stage
+    trigger = _body('create or replace function private.ab_record_doc_change()',
+                    "drop trigger if exists")
+    assert "old.data->'final_members' is distinct from new.data->'final_members'" in trigger
+
+
+def test_owner_admission_tables_bound_slots_and_keep_receipt_wire_separate():
+    for table in ('ab_mutation_admission_groups', 'ab_mutation_admission_legs'):
+        assert f'create table if not exists public.{table}' in SCHEMA
+        assert f'alter table public.{table} enable row level security' in SCHEMA
+        assert f'revoke all on table public.{table}' in SCHEMA
+    legs = _body('create table if not exists public.ab_mutation_admission_legs',
+                 'alter table public.ab_mutation_admission_groups enable')
+    assert 'receipt_slot between 0 and 4095' in legs
+    assert 'ordinal between 1 and 1025' in legs
+    assert 'unique (root, protocol_epoch, receipt_slot)' in legs
+    assert 'primary key (root, protocol_epoch, operation_id)' in legs
+    assert 'check (not cancel_acknowledged or cancelled)' in legs
+    assert 'on delete cascade' in legs
+    assert 'admission_required boolean not null default false' in SCHEMA
+
+
+def test_admission_enable_requires_explicit_empty_sealed_epoch():
+    enable = _body('create or replace function public.ab_admin_enable_mutation_admission(',
+                   'revoke all on function public.ab_admin_enable_mutation_admission(')
+    assert 'security invoker' in enable
+    assert 'pg_advisory_xact_lock(' in enable
+    assert 'ab_database_mutation_seals' in enable
+    assert 'admission requires an empty receipt epoch' in enable
+    assert 'ab_mutation_receipts' in enable and 'ab_mutation_admission_groups' in enable
+    assert 'admission_required = true' in enable
+    assert 'admission_required = false' not in SCHEMA
+    assert 'grant execute on function public.ab_admin_enable_mutation_admission' not in SCHEMA
+
+
+def test_admission_plan_is_bounded_exact_and_replayed_before_fresh_authority():
+    admit = _body('create or replace function public.ab_admit_mutation_owner(',
+                  'revoke all on function public.ab_admit_mutation_owner(')
+    assert 'v_count < 1 or v_count > 1025' in admit
+    assert 'octet_length(p_plan::text) > 524288' in admit
+    assert "v_item - array['operation_id','kind','client_digest']" in admit
+    assert "v_id::text is distinct from (v_item->>'operation_id')" in admit
+    assert 'v_id = any(v_ids)' in admit
+    assert admit.index("'agentbridge-mutation-epoch:'") < admit.index("'agentbridge-mutation-admission:'")
+    assert admit.index('v_plan is distinct from p_plan') < admit.index('ab_mutation_lock_actor')
+    assert 'v_group.actor_uid is distinct from v_actor' in admit
+    assert "v_count = 1 and p_plan->0->>'kind' = 'member_claim'" in admit
+    # Unaffiliated reservations are bounded before capacity is evaluated, and
+    # only after exact replay, which must stay available to the same owner.
+    pending = admit.index('unaffiliated mutation admission is already pending')
+    budget = admit.index('unaffiliated mutation admission budget exhausted')
+    assert admit.index('v_plan is distinct from p_plan') < pending < budget
+    assert budget < admit.index('v_occupied + v_count > 4096')
+    assert 'not (l.cancelled and l.cancel_acknowledged)' in admit
+    assert "l.operation_kind = 'member_claim') >= 4" in admit
+    assert admit.index("'status', 'full'") < admit.index('insert into public.ab_mutation_admission_groups')
+    assert 'v_occupied + v_count > 4096' in admit
+    assert 'pg_try_advisory_xact_lock' not in admit
+
+
+def test_gated_begin_uses_exact_admission_slot_without_changing_terminal_replay():
+    begin = _body('create or replace function private.ab_mutation_begin(',
+                  'revoke all on function private.ab_mutation_begin(')
+    assert begin.index("'replay', true") < begin.index('if v_root.admission_required then')
+    gated = begin[begin.index('if v_root.admission_required then'):begin.index('  v_base :=')]
+    for expected in ('v_leg.actor_uid is distinct from v_actor',
+                     'v_leg.operation_kind is distinct from p_operation_kind',
+                     'v_leg.client_digest is distinct from p_payload_digest',
+                     'v_leg.cancelled', "v_leg.receipt_slot, 'applying'"):
+        assert expected in gated
+    # Option B: admission is optional per owner. Only the shared admission
+    # mutex is taken, after the operation lock and before the leg lookup; a
+    # found leg is exact and never falls back to an unadmitted slot.
+    assert gated.count('pg_advisory_xact_lock') == 1
+    assert 'pg_advisory_xact_lock_shared(' in gated
+    assert begin.index("'agentbridge-mutation-operation:'") < begin.index(
+        "'agentbridge-mutation-admission:'")
+    assert gated.index('pg_advisory_xact_lock_shared(') < gated.index(
+        'from public.ab_mutation_admission_legs l')
+    found = gated[gated.index('if found then'):]
+    assert found.index("'typed mutation requires matching uncancelled admission'") < found.index(
+        "return pg_catalog.jsonb_build_object('replay', false")
+    allocator = begin[begin.index('  v_base :='):]
+    assert allocator.index('from public.ab_mutation_admission_legs l') < allocator.index(
+        'pg_try_advisory_xact_lock')
+    full = allocator[allocator.rindex('select pg_catalog.count(*) into v_count'):]
+    assert 'from public.ab_mutation_admission_legs l' in full and 'union' in full
+
+
+def test_admission_shares_slots_with_unadmitted_writes():
+    admit = _body('create or replace function public.ab_admit_mutation_owner(',
+                  'revoke all on function public.ab_admit_mutation_owner(')
+    collision = admit[admit.index("-- An operation that already executed unadmitted"):]
+    assert 'from public.ab_mutation_receipts r' in collision[:collision.index(
+        "'mutation admission operation collision'")]
+    occupancy = admit[admit.index('into v_occupied'):admit.index('v_occupied + v_count > 4096')]
+    assert 'ab_mutation_admission_legs' in occupancy and 'ab_mutation_receipts' in occupancy
+    assert 'union' in occupancy
+    selection = admit[admit.index('into v_slots'):admit.index(
+        'insert into public.ab_mutation_admission_groups')]
+    assert 'ab_mutation_admission_legs' in selection and 'ab_mutation_receipts' in selection
+    # Exclusive mutex only: no per-slot or per-operation locks can invert order.
+    assert 'pg_try_advisory_xact_lock' not in admit
+    assert "'agentbridge-mutation-operation:'" not in admit
+
+
+def test_cancel_is_exact_no_effect_control_and_ack_requires_cancellation():
+    cancel = _body('create or replace function private.ab_mutation_admission_cancel(',
+                   'revoke all on function private.ab_mutation_admission_cancel(')
+    assert cancel.index("'agentbridge-mutation-epoch:'") < cancel.index("'agentbridge-mutation-operation:'")
+    assert 'g.actor_uid = v_actor' in cancel
+    assert 'l.owner_id = p_owner_id' in cancel
+    assert 'v_leg.operation_kind is distinct from p_kind' in cancel
+    assert 'v_leg.client_digest is distinct from p_client_digest' in cancel
+    assert "if not v_leg.cancelled then" in cancel
+    assert "v_status := 'executed'" in cancel and "v_status := 'cancelled'" in cancel
+    assert 'insert into' not in cancel and 'delete from' not in cancel
+    assert 'ab_mutation_lock_actor' not in cancel
+
+
+def test_rotation_requires_acknowledged_effect_or_acknowledged_no_effect_for_every_leg():
+    rotate = _body('create or replace function public.ab_admin_rotate_mutation_epoch(',
+                   'revoke all on function public.ab_admin_rotate_mutation_epoch(')
+    assert 'l.cancelled and l.cancel_acknowledged and r.operation_id is null' in rotate
+    assert "not l.cancelled and r.receipt_state='terminal' and r.acknowledged_at is not null" in rotate
+    assert 'is not true' in rotate  # a missing receipt must block, not SQL NULL-skip
+    assert 'r.actor_uid=g.actor_uid' in rotate and 'r.payload_digest=l.client_digest' in rotate
+    assert rotate.index('mutation admission legs are not settled') < rotate.index('delete from public.ab_mutation_admission_groups')
+    assert rotate.index('delete from public.ab_mutation_receipts') < rotate.index('delete from public.ab_mutation_admission_groups')

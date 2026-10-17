@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-10-14T11:43:29Z",
+  "project_id": "riagjoluhcwjvmfchbzl",
+  "project_name": "AgentBridge Scratch",
+  "postgresql_version": "17.11",
+  "migration": {
+    "version": "20261014114329",
+    "name": "agentbridge_p1b_terminal_readers_review",
+    "statement_bytes": 4392,
+    "statement_sha256": "12bbc90e8f395bad13080fa002fe06259e02858e798cf18947bb545ef954b14b",
+    "function_body_sha256_prefix": {
+      "public.ab_staged_blob_readable": "3bc91b9cf959e15e",
+      "public.ab_mutation_doc_delete": "bcf60c8dde7bd024"
+    },
+    "prior_bodies_matched_branch_head": {
+      "public.ab_mutation_doc_delete": "5d94c8f3e3ed0ec1",
+      "public.ab_staged_blob_readable": "baf41ab5b6c5f529 (20261014111654)"
+    }
+  },
+  "supersedes_scratch_migration": {
+    "version": "20261014111654",
+    "field": "staged-object read order; direct tombstones of a chat meta",
+    "reason": "independent implementation review: the deleted-room branch ran first on every staged-row read, adding two lookups to a live room's common reads (now checked last, same answers); and doc_delete let any reader, a deleted room's final member included, tombstone chats/<chat>/meta.json, after which chat_delete answered 'already purged' and the room's logs were never removed (now refused for every principal, live or deleted rooms)"
+  },
+  "acceptance": {
+    "file": "20261014114329-acceptance.sql",
+    "statement_bytes": 6224,
+    "statement_sha256": "814e7eb0c5f6a6e1185a8814dc86408053fe56b5368e2a7292d05e30d4786784",
+    "transaction": "single DO block ending in a P0001 raise carrying the observations; residue afterwards: 0 members, roots, docs, logs, receipts, change epochs, manifests and Storage object rows",
+    "observations": {
+      "manifest_published": {"chat_id": "live", "blob_id": "f2-pub", "sealed_bytes": 1},
+      "sees": {
+        "final": {"dead_staged": 1, "live_published": 1, "live_unpublished": 0},
+        "uploader": {"dead_staged": 1, "live_published": 1, "live_unpublished": 1},
+        "departed": {"dead_staged": 0, "live_published": 0, "live_unpublished": 0}
+      },
+      "delete_dead_meta": "42501 typed document delete is unauthorized",
+      "delete_live_meta": "42501 typed document delete is unauthorized",
+      "delete_live_note": {"path": "chats/live/note.json", "deleted": true},
+      "purge_final": {"chat_id": "room", "logs_deleted": 1, "documents_tombstoned": 2},
+      "live_meta_live_after": true
+    }
+  },
+  "limits": {
+    "real_storage_http_listing_acceptance": false,
+    "production_touched": false,
+    "application_activated": false
+  }
+}

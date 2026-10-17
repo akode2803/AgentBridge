@@ -6,6 +6,7 @@ explicit: a new mutating driver API must not silently bypass this owner.
 from __future__ import annotations
 
 import threading
+from uuid import uuid4
 
 from .base import Transport
 from ..store.source_selectors import Selector
@@ -208,6 +209,87 @@ class LocalMutationTransport(Transport):
             self._typed_success()
         return result
 
+    def _identity_owners(self, writer):
+        from ..store.provider_admission_owner import ProviderAdmissionOwnerJournal
+        from .provider_admission import ProviderAdmission
+
+        return ProviderAdmissionOwnerJournal(
+            writer.driver.journal, ProviderAdmission(writer.driver.rpc))
+
+    def create_agent_identity(self, name, prepare, *, keystore, directory):
+        """Resume or mint one agent identity through the bound typed owner."""
+        from ..mesh.identity_dispatch import CREATED, create_agent_identity
+
+        writer = self._bound_writer()
+        if writer is None:
+            raise ValueError('typed mutation journal is not bound')
+        outcome = create_agent_identity(
+            self._identity_owners(writer), writer.driver, keystore, directory,
+            name, prepare)
+        if self._bound_writer() is not writer:
+            raise ValueError('agent identity writer changed')
+        if outcome.state == CREATED:
+            self._typed_success()
+        return outcome
+
+    def create_human_identity(self, name, prepare, *, resume_allowed, keystore,
+                              directory):
+        """Resume or mint one human sign-up through the bound typed owner."""
+        from ..mesh.identity_dispatch import CREATED, create_human_identity
+
+        writer = self._bound_writer()
+        if writer is None:
+            raise ValueError('typed mutation journal is not bound')
+        outcome = create_human_identity(
+            self._identity_owners(writer), writer.driver, keystore, directory,
+            name, prepare, resume_allowed=resume_allowed)
+        if self._bound_writer() is not writer:
+            raise ValueError('human identity writer changed')
+        if outcome.state == CREATED:
+            self._typed_success()
+        return outcome
+
+    def recover_agent_identities(self, *, keystore, directory):
+        """Resume durable identity owners of a bound writer; never opts in."""
+        from ..mesh.identity_dispatch import AgentIdentityDispatcher
+        from ..mesh.identity_publication import OWNER_KIND
+
+        writer = self._bound_writer()
+        if writer is None:
+            return ()
+        owners = self._identity_owners(writer)
+        dispatcher = AgentIdentityDispatcher(owners, writer.driver, keystore, directory)
+        outcomes = []
+        for owner_id in owners.owner_ids(OWNER_KIND):
+            try:
+                outcomes.append(dispatcher.run(owner_id))
+            except KeyError:
+                continue  # settled and reaped by a concurrent creation
+        outcomes = tuple(outcomes)
+        if self._bound_writer() is not writer:
+            raise ValueError('agent identity writer changed')
+        if outcomes:
+            self._typed_success()
+        return outcomes
+
+    def update_doc(self, path, build, *, operation_for=None, log=None):
+        """Compare-and-swap a freshly observed document via the bound writer.
+
+        ``build(current)`` must be a repeatable calculation over raw current
+        data; it may run again after a conflict. Returns (document, changed).
+        ``operation_for`` names each attempt and ``log`` makes a chat meta
+        swap append its records atomically (see the writer).
+        """
+        writer = self._bound_writer()
+        if writer is None:
+            raise ValueError('typed mutation journal is not bound')
+        document, changed = writer.update_document(
+            path, build, operation_for=operation_for, log=log)
+        self._bound_writer()
+        if changed:
+            self._typed_success()
+        return document, changed
+
     def write_latest_doc(self, path, build):
         """Replace a per-device snapshot after its durable retry has settled."""
         writer = self._bound_writer()
@@ -247,6 +329,75 @@ class LocalMutationTransport(Transport):
         # must not create a second outer intent.
         return self._mutate((Selector('doc_exact', path),),
                             lambda: self._transport.create_doc(path, data))
+
+    def create_exact_doc(self, path, data, *, keep_ticket=False):
+        """Create an immutable, uniquely named record.
+
+        Under a bound writer the operation id derives from the path, so an
+        exact retry of the same record replays its retained attempt instead of
+        issuing a second write. A changed payload for that path fails closed.
+        ``keep_ticket`` leaves the release to the caller (``release_operation``).
+        """
+        writer = self._bound_writer()
+        if writer is None:
+            return self.create_doc(path, data)
+        writer.create_exact(path, data, operation_id=self.exact_create_id(path),
+                            release=not keep_ticket)
+        self._bound_writer()
+        self._typed_success()
+        return None
+
+    def settle_operation(self, operation_id):
+        """Exact outcome of a bound writer's keyed attempt (None: never prepared).
+        The ticket stays held until ``release_operation``."""
+        writer = self._bound_writer()
+        if writer is None:
+            raise ValueError('typed mutation journal is not bound')
+        result = writer.settle_operation(operation_id)
+        self._bound_writer()
+        if result is not None:
+            self._typed_success()
+        return result
+
+    def release_operation(self, operation_id):
+        """Release a keyed attempt once its outcome was durably consumed."""
+        writer = self._bound_writer()
+        if writer is None:
+            raise ValueError('typed mutation journal is not bound')
+        writer.release_operation(operation_id)
+        self._bound_writer()
+
+    def exact_create_id(self, path):
+        """The operation id ``create_exact_doc`` uses for ``path``."""
+        from uuid import NAMESPACE_URL, uuid5
+
+        return str(uuid5(NAMESPACE_URL, 'agentbridge-exact-create:' + path))
+
+    def settle_chat_purges(self):
+        """Resume a bound writer's unfinished purges (a lost reply leaves the
+        receipt unacknowledged, which would hold every later epoch rotation;
+        the purged chat is gone, so nothing would ever retry it)."""
+        writer = self._bound_writer()
+        if writer is None:
+            return 0
+        settled = writer.settle_pending('chat_delete', skip_failures=True)
+        self._bound_writer()
+        if settled:
+            self._typed_success()
+        return settled
+
+    def settle_exact_creates(self, prefix, on_created=None, *, skip_failures=False,
+                             include=None):
+        """Resume a bound writer's unfinished exact creates under ``prefix``."""
+        writer = self._bound_writer()
+        if writer is None:
+            return 0
+        settled = writer.settle_exact_creates(prefix, on_created, skip_failures=skip_failures,
+                                              include=include)
+        self._bound_writer()
+        if settled:
+            self._typed_success()
+        return settled
 
     def delete_doc(self, path, *, operation_id=None):
         if self._journal_writer is not None:
@@ -296,6 +447,16 @@ class LocalMutationTransport(Transport):
 
     def delete_chat(self, chat_id, *, operation_id=None):
         if self._journal_writer is not None:
+            if operation_id is None:
+                # The janitor's purge, under a fresh key (a derived one could
+                # be taken first by another principal); a lost reply is
+                # settled by ``settle_chat_purges`` on the next sweep.
+                writer = self._bound_writer()
+                writer.submit_keyed('chat_delete', {'p_chat': chat_id},
+                                    operation_id=str(uuid4()))
+                self._bound_writer()
+                self._typed_success()
+                return None
             return self._typed_submit('chat_delete', {'p_chat': chat_id}, operation_id)
         self._reject_unbound_key(operation_id)
         # The log selector validates the chat identity before any external call.
@@ -597,9 +758,50 @@ class LocalMutationTransport(Transport):
         return self._transport.blob_size(path)
 
     def delete_blob(self, path):
-        if self._journal_writer is not None:
-            raise NotImplementedError('blob writes need typed journal admission')
+        if self._bound_writer() is not None:
+            return self.delete_blobs([path])
         return self._mutate(self._blob_changes(path), lambda: self._transport.delete_blob(path))
+
+    def delete_blobs(self, paths):
+        paths = list(paths)
+        writer = self._bound_writer()
+        if writer is not None:
+            # Storage is outside the seal and a delete is idempotent, so no
+            # receipt: objects of chats' own folders, as the bound principal.
+            from ..mesh.attachments import is_chat_object_path
+            from .staged_attachments import StagedAttachmentPublisher
+
+            if not all(is_chat_object_path(path) for path in paths):
+                raise ValueError('only chat objects are deleted directly')
+            StagedAttachmentPublisher(writer).remove(paths)
+            self._bound_writer()
+            return None
+        for at in range(0, len(paths), 100):
+            chunk = paths[at:at + 100]
+            changes = self._folder_changes(chunk)
+            if len(changes) > 8:  # an intent holds 8 selectors: one per object
+                for path in chunk:
+                    self.delete_blob(path)
+                continue
+            self._mutate(changes, lambda chunk=chunk: self._transport.delete_blobs(chunk))
+        return None
+
+    @classmethod
+    def _folder_changes(cls, paths):
+        """``_blob_changes`` for many paths, each chat folder covered once."""
+        changes = set()
+        for path in paths:
+            parts = path.split('/') if type(path) is str else ()
+            if len(parts) < 3:
+                changes.update(cls._blob_changes(path))
+                continue
+            changes.add(Selector('doc_prefix', '/'.join(parts[:2])))
+            if len(parts) == 4 and parts[0] == 'chats' and parts[2] == 'msgs':
+                changes.add(Selector('log_chat', parts[1]))
+        return tuple(sorted(changes))
+
+    def list_blobs(self, prefix):
+        return self._transport.list_blobs(prefix)
 
     def purge_deleted_docs(self, older_than_days=30.0):
         if self._journal_writer is not None:

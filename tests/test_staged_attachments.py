@@ -11,7 +11,7 @@ from uuid import uuid4
 import pytest
 import test_operation_journal as journal_cases
 
-from agentbridge.core.errors import PermissionDenied, ValidationError
+from agentbridge.core.errors import PermissionDenied, TransportError, ValidationError
 from agentbridge.gui import attachment_read
 from agentbridge.mesh.attachments import AttachmentDelivery, attachment_path
 from agentbridge.mesh.messaging import MessagingService, OUTBOX_APPEND
@@ -63,6 +63,10 @@ class _Bucket:
     def download(self, path):
         self.calls.append(("download", path))
         return self.objects[path][1]
+
+    def remove(self, keys):
+        self.calls.append(("remove", tuple(keys)))
+        return [{"name": key} for key in keys if self.objects.pop(key, None)]
 
 
 class _Writer:
@@ -576,3 +580,41 @@ def test_legacy_manifest_prevents_new_consumer_publication(rig, tmp_path, monkey
         assert len(writer.submissions) == 1
     finally:
         store.close()
+
+
+def test_bound_chat_object_removal_is_batched_exact_and_identity_checked(rig):
+    _events, bucket, writer, *_rest = rig
+    publisher = staged_attachments.StagedAttachmentPublisher(writer)
+    paths = [f"blob-stage/room/f2-{n:03}" for n in range(150)]
+    for path in paths:
+        bucket.objects["team/" + path] = (str(uuid4()), b"x")
+    bucket.objects["team/blob-stage/room/f2-000x"] = ("id-x", b"y")  # shares a prefix
+    bucket.calls.clear()
+    publisher.remove(paths)
+    removes = [keys for name, keys in bucket.calls if name == "remove"]
+    assert [len(keys) for keys in removes] == [100, 50]  # 100 exact keys a call
+    assert set(bucket.objects) == {"team/blob-stage/room/f2-000x"}
+    publisher.remove(paths[:1])  # already gone: still the goal, no error
+    # Every call runs under the identity check: a session that changes
+    # between two calls of one batch stops the batch.
+    for path in paths:
+        bucket.objects["team/" + path] = (str(uuid4()), b"x")
+    real_remove = bucket.remove
+
+    def remove_then_switch(keys):
+        removed = real_remove(keys)
+        bucket._headers = {"Authorization": "Bearer someone-else"}
+        return removed
+
+    bucket.remove = remove_then_switch
+    with pytest.raises(ValidationError, match="identity changed"):
+        publisher.remove(paths)
+    assert len(bucket.objects) == 51  # the second 100-key call never went out
+    bucket._headers = {"Authorization": "Bearer token-1"}
+
+    def unavailable(_keys):
+        raise RuntimeError("storage unavailable")
+
+    bucket.remove = unavailable
+    with pytest.raises(TransportError, match="Storage request failed"):
+        publisher.remove(paths)

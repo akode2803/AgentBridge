@@ -72,7 +72,9 @@ def test_rotation_recovers_lost_ack_reply_but_keeps_opaque_records(world):
     assert journal._adopt_epoch(_epoch(3, NEXT)) == 0
 
 
-@pytest.mark.parametrize('state', ['prepared', 'attempted', 'accepted'])
+# A durable receipt never acknowledged contradicts closure; ticketed attempts
+# without receipts are proven unexecuted (tests/test_closure_resolution.py).
+@pytest.mark.parametrize('state', ['accepted'])
 def test_ambiguous_or_uncompleted_ticket_prevents_retirement(world, state):
     _, _, _, _, journal = world
     journal._adopt_epoch(_epoch())

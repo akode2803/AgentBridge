@@ -1,5 +1,250 @@
 # Cloud source handoff
 
+## 2026-10-14 deleted-chat cleanup (D-018)
+
+A typed delete-for-everyone now reclaims the chat's files right after its
+swap, and only the room's final members (recorded by the deletion fold as
+`final_members`; older deletions fall back to tenure) can read, clean and
+purge a deleted room. Reclaim lists the chat's own folders (`chats/<chat>/`,
+`blob-stage/<chat>/`, 100 names per Storage page) and deletes everything.
+Deletes are batched (100 keys a Storage call); bound, they are direct,
+identity-checked Storage removes inside the chat's own folders. Bound
+`delete_chat` is a `chat_delete` under a fresh key, and each janitor sweep
+first settles a purge whose reply was lost. `doc_delete` never tombstones a
+chat meta. A purged room answers every root member alike. Scratch:
+`agentbridge_p1b_terminal_readers` (20261014111654) and the review
+follow-up `agentbridge_p1b_terminal_readers_review` (20261014114329)
+applied and accepted in rolled-back blocks, residue 0; evidence
+docs/provider-mutation-acceptance/20261014111654-* and 20261014114329-*.
+Details:
+docs/PROVIDER_ADMISSION_CHECKPOINT.md "Deleted-chat cleanup"; open limits in
+BACKLOG.md (refold vs swap order, pending-write purge hold, manifests after
+purge, live-room staged orphans, typed tombstone purge, derivable
+exact-create keys). The hosted Storage HTTP listing check passed on
+2026-10-17 (docs/provider-mutation-acceptance/20261017-storage-listing-http-results.json).
+
+## 2026-10-14 uniform meta-append answer (D-017)
+
+`ab_mutation_meta_append` now gives every principal in the chat's tenure who
+is not a current member the same `applied=false`, whatever version they send
+(before, the current version was refused while others answered, so a former
+member could probe whether the chat changed after they left). Only a current
+member of the exact version swaps; outsiders are refused. Simpler and closes
+the probe. Scratch: `agentbridge_p1b_meta_append_uniform_answer`
+(20261014103831) applied and accepted in one rolled-back block, residue 0;
+evidence docs/provider-mutation-acceptance/20261014103831-*. The CI PG gate
+schedule checks both versions for a former member and the outsider at the
+current version. Aryan's standing rule (2026-10-14): keep the architecture as
+simple as possible unless security, latency or another relevant property
+suffers. Harness commands need no new lane (owner commands, peer access,
+AppLink exist; none work under a bound writer yet, BACKLOG "Bound generic
+submits").
+
+## 2026-10-14 terminal flows (meta append)
+
+Branch `codex/provider-owner-admission` (PR #146 continues). New provider RPC
+`ab_mutation_meta_append`: the conditional `meta.json` swap and the actor's
+signed events, appended to the actor's log in one transaction under pre-swap
+authority. Every typed membership action except genesis now uses it, which
+lets leave (groups; agents cascade first) and delete-for-everyone (admins)
+work under a bound writer: both first deliver this device's queued sends to
+the chat and refuse while any remain; no leaver-minted rotation; attachments
+wait for the janitor. Delete agent/account treat an already-gone membership as
+done. A refused action keeps its Store row until a receipt or closure; the
+outbox cycle sweeps leftovers (`MembershipService.sweep`, 60 s backoff); the
+overlap with an in-flight send reads "this chat is busy". The RPC compares
+the version before membership: anyone in the chat's tenure gets
+`applied=false` for a version that moved on (a race lost to one's own removal
+or the deletion settles); only a current member may swap. Leave/delete settle
+the chat's earlier actions first and drain every queued send of mine; the
+sweep never blocks the outbox thread, is capped and backs off per row.
+Unbound path unchanged. Details: docs/PROVIDER_ADMISSION_CHECKPOINT.md
+"Terminal flows"; DECISIONS.md D-016..D-018.
+
+Scratch (Aryan allowed applying schema freely, 2026-10-14) now carries the
+branch protocol through `agentbridge_p1b_meta_append_rpc`, plus a Scratch-only
+`ab_docs_touch` version trigger its scaffold lacked (every doc sat at seq 0, so
+no compare RPC could match). Hosted acceptance of the meta append passed in one
+rolled-back DO block; exact SQL, hashes and observations in
+docs/provider-mutation-acceptance/20261014*. It also caught non-hex digests in
+the new CI gate schedule (fixed). The version-first correction is
+`agentbridge_p1b_meta_append_tenure_answer`, accepted the same way
+(`20261014064104-*`). Two independent Claude reviews (design, then
+implementation) each found a chat-wedging HIGH plus smaller gaps; all fixed
+with tests.
+
+New BACKLOG items: typed outbox retries refused appends forever; janitor/blob
+deletion under typed; agent ownership transfer under typed; member-controlled
+`materialized_ns` overflow; `p_log` actor binding; `ab_docs_touch`
+search_path; activation gates (provider has meta append; drain legacy terminal
+rows); release completed meta-append tickets that lost their row. Next: message overlays, read-ack reservation, avatar blobs, harness/GUI
+write classification, janitor/blobs, activation wiring. No production schema
+change, activation or merge.
+
+## 2026-10-14 membership owner (meta first)
+
+Branch `codex/provider-owner-admission` (PR #146 continues). Under a bound
+writer every membership/settings action is one `meta.json` CAS: the build
+re-checks authority on the fresh provider meta and applies the newly signed
+events on top in swap order (the watermark only moves forward); the events
+are logged only after the swap applied, via a `membership_actions` Store row
+keyed to the exact attempt whose journal ticket is held until the row is
+consumed. Genesis is an exact create; written meta is served until the mirror
+shows it (120 s cap). `MembershipService.recover()` (run before
+`ChatKeyService.recover()` at activation) finishes interrupted actions and
+their key steps; recovery sweeps skip work that still cannot settle. Unbound
+path unchanged. An independent Claude review found a clock-poisoning flaw in
+the first draft's Lamport floor (dropped) and six smaller gaps, all fixed with
+tests. Details: docs/PROVIDER_ADMISSION_CHECKPOINT.md "Membership owner".
+
+New this round: DECISIONS.md (Aryan asked for a running list of revisitable
+decisions with the path taken; keep it current). The Supabase connector works:
+read-only on Scratch is fine, migrations need Aryan's confirmation, production
+untouched; Scratch lacks the branch's later RPCs (`doc_compare_put` etc.).
+Codex review has ended (plan expired); consequential designs get an
+independent Claude reviewer. Open decisions: D-009 (ephemeral status channel),
+D-014 (provider trusts any member to rewrite meta.json).
+
+Next: terminal flows (leave, delete chat, delete agent/account) on the same
+meta-first rule, then message overlays, read-ack reservation, avatar blobs,
+harness/GUI write classification, activation wiring, Scratch acceptance.
+
+## 2026-10-14 chat-key rotation owner
+
+Branch `codex/provider-owner-admission` (PR #146 continues). Under a bound
+writer, chat-key epochs are exact creates (lost replies settle and are reused,
+never re-minted), history re-wraps are per-epoch CAS driven by a durable Store
+row bound to each newcomer's `joined_ns`, and an in-process overlay covers
+mirror lag. `ChatKeyService.recover()` finishes interrupted work; nothing calls
+it until activation wiring exists. Details: docs/PROVIDER_ADMISSION_CHECKPOINT.md
+"Chat-key rotation owner".
+
+Cutover audit (BACKLOG "Typed-writer migration ledger"): about 40 generic
+write sites still raise under a bound writer. First in line is the membership
+genesis/materialization owner (it blocks chat creation and member add/remove,
+and with them the key owner), then terminal flows, message overlays, read-ack
+reservations, harness/GUI write classification, account gaps, activation
+wiring with recovery sweeps, Scratch acceptance, stack consolidation and a
+fleet upgrade before the seal. No production schema change, activation or merge.
+
+## 2026-10-14 typed human sign-up
+
+Branch `codex/provider-owner-admission` (PR #146 continues). Human sign-up now
+has its typed path, inactive like the rest until activation:
+
+- `supabase_admin join`/`seed` claim through `ab_mutation_member_claim` on a
+  sealed root (deterministic operation key; reruns replay exactly and finish
+  the ACK); unsealed roots keep the legacy insert; `revoke` refuses under a
+  seal before changing anything.
+- Bound `AccountsService.create_human` runs a `human_identity_create` owner
+  through the generalized identity dispatcher; the recovery code moves to the
+  keystore holder at publication and is released when the GUI confirms it was
+  saved (new `/api/mesh/recovery_code` and `/api/mesh/recovery_code_saved`;
+  sign-in and restored sessions re-show it).
+- Owner transactions use `secure_delete` and reap/abandon truncate the WAL:
+  reaped private payloads were previously recoverable from the root database.
+- Codex review fixes: per-name identity-creation lock, exact-key `abandon`,
+  inventory-bounded lifecycle walk, `KeyStore.save`/`forget` inside the
+  install lock, duplicate attachment blob IDs rejected before enqueue.
+
+Details: docs/PROVIDER_ADMISSION_CHECKPOINT.md "Human sign-up". Ledger:
+BACKLOG.md "Typed-writer migration ledger" (new deferrals: sealed `revoke`,
+bound migrated-account login upgrade). Next: chat-key rotation owner, terminal
+flows, then disposable migration acceptance on Scratch and stack
+consolidation. No production schema change, activation or merge.
+
+## 2026-10-13 admission cancellation, settlement and nonmember bound
+
+Claude Opus took over as lead engineer; the main checkout now holds
+`codex/provider-owner-admission` (the `/private/tmp/agentbridge-node-owner`
+worktree was removed after verifying it clean and pushed). PR #146 continues.
+
+Admitted owner legs now settle durably: `cancel` (request committed before the
+RPC; `cancelled` retires a linked unexecuted ticket atomically; `executed`
+recovers the exact receipt by replay), `acknowledge_cancel` after the durable
+cancelled outcome, `settle` deriving applied/conflict from the acknowledged
+receipt and releasing in the same commit, and `reap` of fully settled owners
+without private material. Format 9's leg schema was amended (never activated).
+The valid Codex P1 is fixed in SQL: unaffiliated principals hold one reservation
+not yet settled for closure and four claims per epoch. Evidence and limits:
+docs/PROVIDER_ADMISSION_CHECKPOINT.md. Local 262-test combined gate passed; the
+PostgreSQL gate for the new SQL bound runs in CI only (no local PostgreSQL).
+
+Draft recovery across closure is also done: authenticated adoption rebases
+never-admitted owners (prepared/full/ambiguous) into the new epoch with the same
+identities and private material, and `certify_closure()` records cancel/receipt
+ACKs proven by rotation so admitted owners can still settle and reap. Combined
+admission gate: 273 passed.
+
+The inactive agent identity dispatcher (mesh/identity_dispatch.py) now drives
+a frozen owner: exact key install, admission, account CAS, pin and bootstrap
+only after the account applied, canonical-lifecycle descent check, and reap
+after proving the keystore holds the exact key. Taken names cancel the unused
+bootstrap and keep the key unpinned. Gate: 350 passed.
+
+With a bound typed writer, AccountsService.create_agent now routes through it,
+resuming any pending owner for the name before minting (the owner is the
+durable pending-creation record); the unbound legacy path is unchanged.
+
+Bound password change is one exact CAS through update_document; bound account
+patches (all profile setters) and keyed agent adoption now work too, with
+lifecycle records created exactly under path-derived keys and settled before
+the subject's head is extended.
+
+Open prerequisite found this round: with admission_required enabled the
+provider rejects every typed write lacking an admitted leg, and generic writers
+(allocate_ticket, update_document, state actions, outbox owners, application
+submits) do not obtain one yet. See docs/PROVIDER_ADMISSION_CHECKPOINT.md.
+
+Option B chosen by Aryan: admission is optional per owner (multi-leg and
+private-material owners only). Provider SQL shares slots safely (`394bebe`);
+authenticated adoption releases ticketed attempts without receipts, proven
+unexecuted by closure plus durable-receipt-before-ACK, and requeues their
+consumers. Untracked opaque rows still fail closed. Rationale and evidence:
+docs/PROVIDER_ADMISSION_CHECKPOINT.md. Terminal flows (delete agent/account)
+still need typed terminal membership events and a chat-key rotation owner.
+
+Next: human creation (claim, then identity owner), key-rotation and terminal
+owners, then disposable migration acceptance and stack consolidation.
+Operator eviction of never-settled member legs is deliberately deferred
+(pre-existing parity; needs retained lineage). No production schema, activation
+or merge.
+
+## 2026-10-13 provider admission and private identity checkpoint
+
+Active branch `codex/provider-owner-admission`, PR #146 stacked on PR #145.
+PR145's terminal enqueue/runtime dispatch findings are fixed at `21ca727`:
+terminal actions reject before cascade/cache/outbox effects; non-append runtime
+rows retain their handlers. Focused repair gate139 passed.
+
+Prospective provider admission/cancellation, strict Python wire, and format9
+root-owned immutable admission plans are implemented. Positive admission commits
+before exact leg-to-ticket linkage; reserved capacity transfers once. Ambiguous
+or full replies cannot dispatch. Private agent identity bundle/account/bootstrap
+and both absent-CAS requests freeze atomically and survive restart. This is
+inactive preparation, not an activated account writer. Bound legacy identity
+workflows reject before mutation; legacy workflows retain binding admission
+through bootstrap to prevent mid-workflow key destruction.
+
+Local combined coordinator/journal/owner gate186 passed including the separately
+rerun localhost test. Identity gate21 and existing account gate19 passed.
+Independent admission review11 passed; final binding-race repair review passed
+with no remaining scoped finding. Two distinct admission probes are permanent
+in tests/test_provider_admission_recovery.py (3 final independent probes passed).
+Provider PostgreSQL16 full-capacity/two-session CI passed `3c939f8`, run38401966688;
+later Python changes still need current-head platform evidence. Exact authenticated
+Scratch SQL passed and rolled back completely; the executed script is retained.
+See docs/PROVIDER_ADMISSION_CHECKPOINT.md for evidence and limitations.
+
+Next: exact cancellation and domain-owner settlement/consumption, then recover
+full/ambiguous effect-free drafts across authenticated epoch closure. Current
+format9 intentionally blocks adoption while owners remain. Then agent creation
+install/account-CAS/bootstrap/canonical acceptance, remaining human/password/key
+and terminal owners, disposable migration acceptance and PR consolidation.
+Do not invent an authority verdict or clear old attempted mutations. Global
+name/handle uniqueness is pre-existing hardening, not a new migration blocker.
+No production schema, app/harness activation, restart or merge occurred.
+
 ## 2026-10-13 local capacity and lifecycle safety checkpoint
 
 Current branch `codex/compound-write-owners`, extending PR #145. The current local
@@ -1841,3 +2086,41 @@ must use immutable staged-object identity, byte size and digest evidence before
 publishing the database manifest; it must not claim object upload and database
 receipt are one atomic transaction. The P1b readiness marker and inactive Python
 wire remain last.
+
+## Names are never freed; private poke channel — v0.24.378
+
+Design and independent review: docs/NAME_RETENTION_AND_PRIVATE_POKES.md
+(D-020, agreed by Aryan 2026-10-17). Schema (docs/supabase_schema.sql, the
+name-retention section at the end plus in-place edits):
+
+- `ab_members.revoked_at`. `ab_member`, `lock_actor` and `member_leave`
+  ignore revoked rows. Typed leave revokes instead of deleting, the legacy
+  self-delete policy is gone, and a trigger refuses deletes and un-revokes
+  for every role.
+- One owner per name across `ab_members` and `users/<name>.json`, under a
+  shared per-name transaction lock. A login cannot claim an existing
+  account's name (agents had no row, so any login could take theirs), and
+  an account doc cannot take another login's name. Hard deletes of
+  `users/` rows are skipped.
+- `realtime.messages` policies make `ab-<root>` private to active members.
+
+Client: the Realtime thread joins with `private: true` using the PostgREST
+session's token (re-read every 30 s; no second password sign-in), or the
+service key. It stays off without either, and backs off 5 minutes after an
+authorization refusal. The janitor's tombstone purge skips `users/`.
+`supabase_admin revoke` needs `--permanent`, `seed` refuses revoked or
+foreign names, and `join` points a lost password at `seed`.
+
+Verified: unit tests; Scratch schema applied and a rolled-back hosted
+acceptance passed
+(docs/provider-mutation-acceptance/20261017-name-retention-results.json);
+Aryan's live-channel check (devtools/validate_private_pokes_http.py) passed
+on Scratch before and after turning off "Allow public access", which is now
+off there
+(docs/provider-mutation-acceptance/20261017-private-pokes-http-results.json).
+A fresh project has no `realtime.messages` partitions until the first
+private join, which fails once with "MissingPartition" and is retried.
+Pending:
+- the CI Postgres gate on push;
+- production, only when Aryan says so, after the read-only checks in the
+  note's Rollout.

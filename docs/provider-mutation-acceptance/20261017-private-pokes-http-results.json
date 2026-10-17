@@ -1,0 +1,85 @@
+{
+ "check": "private ab-<root> poke channel against live Supabase Realtime",
+ "design": "docs/NAME_RETENTION_AND_PRIVATE_POKES.md",
+ "project": "AgentBridge Scratch (riagjoluhcwjvmfchbzl)",
+ "date": "2026-10-17",
+ "schema": "name_retention_private_pokes_20261017 (20261017095658)",
+ "run_by": "Aryan, on his machine with the two Scratch logins (Claude does not sign in with passwords)",
+ "script": "devtools/validate_private_pokes_http.py",
+ "script_sha256": "123bfb6768888a9fd86fd0ec466b81a617f72e5c7ee631bd2c8b51881a43f7f6",
+ "command": "validate_private_pokes_http.py --root private-pokes-http-20261017",
+ "fixture": {
+  "private-pokes-http-20261017": "owner and reader are active members",
+  "private-pokes-http-20261017-out": "owner only; the reader is not a member",
+  "private-pokes-http-20261017-rev": "owner active; the reader's row revoked"
+ },
+ "earlier_attempts": [
+  {
+   "result": "failed",
+   "cause": "MissingPartition: Scratch had no realtime.messages partitions (no private channel had ever joined). The owner's join failed; Realtime made the daily partitions right after, and the reader's join a moment later succeeded. Not an authorization refusal: the client retries it within seconds (test_realtime_refusal_is_recognised_from_the_join_error). Production rollout now checks today's partition first."
+  },
+  {
+   "result": "failed",
+   "cause": "script bug: the public join reused the reader's connection, and the client keeps one channel per topic, so it replaced the reader's private channel and the reader's poke went out publicly; the production thread was not woken. Every other observation matched the pass below. Fixed: the public join runs last on its own connection."
+  }
+ ],
+ "runs": {
+  "public_access_on": {
+   "result": "passed",
+   "owner_id": "a677fbdd-979f-4faa-9a88-8d5532f1947d",
+   "reader_id": "c6ef5d0c-162f-419d-aa50-d9995ff0b20d",
+   "member_joins": {
+    "owner": "SUBSCRIBED",
+    "reader": "SUBSCRIBED"
+   },
+   "owner_to_reader": true,
+   "reader_to_owner": true,
+   "outsider_join": {
+    "state": "CHANNEL_ERROR",
+    "refused": true
+   },
+   "revoked_join": {
+    "state": "CHANNEL_ERROR",
+    "refused": true
+   },
+   "production_thread_ready": true,
+   "production_thread_woken": true,
+   "production_thread_outsider_refused": true,
+   "public_join": "SUBSCRIBED",
+   "public_hears_private": false,
+   "public_access_enforced": false
+  },
+  "public_access_off": {
+   "result": "passed",
+   "owner_id": "a677fbdd-979f-4faa-9a88-8d5532f1947d",
+   "reader_id": "c6ef5d0c-162f-419d-aa50-d9995ff0b20d",
+   "member_joins": {
+    "owner": "SUBSCRIBED",
+    "reader": "SUBSCRIBED"
+   },
+   "owner_to_reader": true,
+   "reader_to_owner": true,
+   "outsider_join": {
+    "state": "CHANNEL_ERROR",
+    "refused": true
+   },
+   "revoked_join": {
+    "state": "CHANNEL_ERROR",
+    "refused": true
+   },
+   "production_thread_ready": true,
+   "production_thread_woken": true,
+   "production_thread_outsider_refused": true,
+   "public_join": "CHANNEL_ERROR",
+   "public_access_enforced": true
+  }
+ },
+ "reading": [
+  "members join a private channel with their own session token and hear each other",
+  "a non-member and a revoked member are refused, and the error is recognised as an authorization refusal, so the client backs off 5 minutes instead of reconnecting",
+  "the production _RealtimeThread joins with the transport's token, is woken by a member's poke, and records a refusal on a root its login is not in",
+  "a public subscriber does not hear private pokes: during a rollout old and new clients do not hear each other, and the 45 s safety polls cover the gap",
+  "with \"Allow public access\" off, a public join is refused: an un-updated client cannot join and falls back to polling"
+ ],
+ "scratch_setting_after": "Allow public access is OFF on Scratch from 2026-10-17"
+}

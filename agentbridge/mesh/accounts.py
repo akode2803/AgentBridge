@@ -15,15 +15,18 @@ Model:
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import os
 import re
 import secrets
+from functools import wraps
+from uuid import uuid4
 
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from .. import crypto
-from ..core.errors import PermissionDenied, ValidationError
+from ..core.errors import PermissionDenied, TransportError, ValidationError
 from ..core.models import Account, ChatKind, UserKind
 from ..core.timekit import utcnow_iso
 from ..transport.base import Transport
@@ -52,6 +55,47 @@ def valid_name(name: str) -> bool:
     return bool(_NAME_RE.match(name or "")) and name not in RESERVED_NAMES
 
 
+def _password_matches(doc, password: str) -> bool:
+    auth = (doc if isinstance(doc, dict) else {}).get("auth") or {}
+    algo = auth.get("algo")
+    try:
+        if algo == "scrypt":
+            salt = base64.b64decode(auth["salt"])
+            expected = base64.b64decode(auth["hash"])
+            return secrets.compare_digest(_scrypt(password, salt), expected)
+        if algo == "pbkdf2":
+            # migrated v1 record (hex salt/hash, sha256, iteration count);
+            # the login flow upgrades it to scrypt after a success
+            import hashlib
+
+            derived = hashlib.pbkdf2_hmac(
+                "sha256", password.encode("utf-8"),
+                bytes.fromhex(auth["salt"]), int(auth["iterations"]),
+            )
+            return secrets.compare_digest(derived, bytes.fromhex(auth["hash"]))
+    except (KeyError, ValueError, TypeError):
+        return False
+    return False
+
+
+def _identity_workflow(operation):
+    """Keep one-way journal binding out of an entire legacy identity workflow.
+
+    _legacy_write holds only its admission counter across I/O, not the provider
+    guard or a database transaction. Nested identity helpers may safely nest it.
+    """
+    @wraps(operation)
+    def admitted(self, *args, **kwargs):
+        from ..transport.local_mutations import LocalMutationTransport
+
+        if isinstance(self.tx, LocalMutationTransport):
+            self._require_legacy_identity_owner()
+            return self.tx._legacy_write(lambda: operation(self, *args, **kwargs))
+        return operation(self, *args, **kwargs)
+
+    return admitted
+
+
 class AccountsService:
     def __init__(
         self,
@@ -71,10 +115,111 @@ class AccountsService:
         self.machine = machine
         self.keystore = keystore or KeyStore()
 
+    def _require_legacy_identity_owner(self) -> None:
+        """Typed identity publication needs a durable private-material owner."""
+        from ..transport.local_mutations import LocalMutationTransport
+
+        if isinstance(self.tx, LocalMutationTransport) and self.tx._bound_writer() is not None:
+            raise ValidationError(
+                "identity mutation requires a durable identity publication owner"
+            )
+
     # ------------------------------------------------------------- creation
     def create_human(self, name: str, password: str, *, display: str = "") -> tuple[Account, str]:
         """Returns (account, recovery_code). The recovery code is shown ONCE:
-        forgotten password + lost code = history unreadable (D5)."""
+        forgotten password + lost code = history unreadable (D5).
+
+        A bound typed writer routes through the durable identity owner, which
+        keeps the code until the GUI confirms it was saved
+        (``recovery_code_saved``); the legacy path is otherwise unchanged."""
+        if self._typed_identity_writer() is not None:
+            return self._create_human_typed(name, password, display=display)
+        return self._create_human_legacy(name, password, display=display)
+
+    def _create_human_typed(self, name: str, password: str, *,
+                            display: str) -> tuple[Account, str]:
+        from .identity_dispatch import CREATED, NAME_TAKEN
+        from .identity_publication import prepare_human_identity
+
+        self._require_valid_name(name)
+        if len(password or "") < 6:
+            raise ValidationError("password must be at least 6 characters")
+
+        def prepare(root: str, actor_id: str):
+            # Minted only when no durable owner for this name exists. The
+            # provider's absent-CAS, not this local view, decides the name.
+            if self.directory.handle_taken(name):
+                raise ValidationError(f"@{name} is taken")
+            return prepare_human_identity(
+                owner_id=str(uuid4()), root=root, actor_id=actor_id, name=name,
+                password=password, display=display)
+
+        outcome = self.tx.create_human_identity(
+            name, prepare, keystore=self.keystore, directory=self.directory,
+            resume_allowed=lambda account: _password_matches(account, password))
+        if outcome.state == CREATED:
+            # The exact published document; the mirror may not show it yet.
+            return Account.from_dict(outcome.account), outcome.recovery_code
+        if outcome.state == NAME_TAKEN:
+            resumed = self._published_signup(name, password)
+            if resumed is not None:
+                return resumed
+            raise ValidationError(f"@{name} is taken")
+        raise TransportError(
+            f"@{name} is still being created ({outcome.state.replace('_', ' ')}); "
+            "retrying resumes the same account")
+
+    def _published_signup(self, name: str, password: str) -> tuple[Account, str] | None:
+        """This machine's own sign-up, completed before its code was shown.
+
+        The owner is gone once the account is published, so a retried sign-up
+        sees the name taken. It is ours when the code held here recovers the
+        published account's key, which this keystore holds, and the password
+        matches; then the same code is shown again.
+        """
+        code = self.keystore.pending_recovery_code(name)
+        bundle = self.keystore.load(name) if code is not None else None
+        if bundle is None:
+            return None
+        doc = self.tx.get_doc(P.user(name))
+        if not _password_matches(doc, password) or not self._recovers(doc, code, bundle):
+            return None
+        return Account.from_dict(doc), code
+
+    @staticmethod
+    def _recovers(doc, code: str, bundle: bytes) -> bool:
+        wrap = ((doc if isinstance(doc, dict) else {}).get("keys") or {}).get("recovery")
+        try:
+            return crypto.unwrap_bundle(wrap, code) == bundle
+        except (crypto.CryptoFail, TypeError, AttributeError):
+            return False
+
+    def pending_recovery_code(self) -> str | None:
+        """A held one-time code the signed-in user has not confirmed saving.
+
+        Shown again until confirmed. A code that no longer recovers the
+        published account is stale and dropped; an unreadable account keeps it.
+        """
+        code = self.keystore.pending_recovery_code(self.user)
+        if code is None:
+            return None
+        doc = self.tx.get_doc(P.user(self.user))
+        bundle = self.keystore.load(self.user)
+        if not isinstance(doc, dict) or bundle is None:
+            return None
+        if not self._recovers(doc, code, bundle):
+            self.keystore.release_recovery_code(self.user)
+            return None
+        return code
+
+    def recovery_code_saved(self) -> bool:
+        """The user confirmed saving the code shown to them: forget it here."""
+        return self.keystore.release_recovery_code(self.user)
+
+    @_identity_workflow
+    def _create_human_legacy(self, name: str, password: str, *,
+                             display: str = "") -> tuple[Account, str]:
+        self._require_legacy_identity_owner()
         self._require_free(name)
         if len(password or "") < 6:
             raise ValidationError("password must be at least 6 characters")
@@ -102,6 +247,13 @@ class AccountsService:
         )
         return Account.from_dict(doc), recovery_code
 
+    def _typed_identity_writer(self):
+        from ..transport.local_mutations import LocalMutationTransport
+
+        if isinstance(self.tx, LocalMutationTransport):
+            return self.tx._bound_writer()
+        return None
+
     def create_agent(
         self,
         name: str,
@@ -110,7 +262,59 @@ class AccountsService:
         harness: dict | None = None,
     ) -> Account:
         """Create an agent ON THIS MACHINE, owned by the signed-in human
-        (machine-login ownership). Agents never get an auth record."""
+        (machine-login ownership). Agents never get an auth record.
+
+        A bound typed writer routes through the durable identity owner; the
+        legacy path otherwise stays unchanged (binding is one-way)."""
+        if self._typed_identity_writer() is not None:
+            return self._create_agent_typed(name, display=display, harness=harness)
+        return self._create_agent_legacy(name, display=display, harness=harness)
+
+    def _create_agent_typed(self, name: str, *, display: str,
+                            harness: dict | None) -> Account:
+        from .identity_dispatch import CREATED, NAME_TAKEN
+        from .identity_publication import prepare_agent_identity
+
+        owner = self.user
+        acc = self.directory.get(owner)
+        if acc is None or acc.kind is not UserKind.HUMAN:
+            raise PermissionDenied("only a signed-in member can create agents")
+        self._require_valid_name(name)
+
+        def prepare(root: str, actor_id: str):
+            # Minted only when no durable owner for this name exists. The
+            # provider's absent-CAS, not this local view, decides the name.
+            if self.directory.handle_taken(name):
+                raise ValidationError(f"@{name} is taken")
+            owner_bundle = self.keystore.load(owner)
+            if not owner_bundle:
+                raise PermissionDenied(f"@{owner}'s identity key is unavailable here")
+            return prepare_agent_identity(
+                owner_id=str(uuid4()), root=root, actor_id=actor_id, name=name,
+                owner=owner, machine=self.machine, owner_bundle=owner_bundle,
+                owner_sign_pub=acc.keys.sign_pub, display=display,
+                owner_display=acc.display, harness=harness)
+
+        outcome = self.tx.create_agent_identity(
+            name, prepare, keystore=self.keystore, directory=self.directory)
+        if outcome.state == CREATED:
+            # The exact published document; the mirror may not show it yet.
+            return Account.from_dict(outcome.account)
+        if outcome.state == NAME_TAKEN:
+            raise ValidationError(f"@{name} is taken")
+        raise TransportError(
+            f"@{name} is still being created ({outcome.state.replace('_', ' ')}); "
+            "retrying resumes the same identity")
+
+    @_identity_workflow
+    def _create_agent_legacy(
+        self,
+        name: str,
+        *,
+        display: str = "",
+        harness: dict | None = None,
+    ) -> Account:
+        self._require_legacy_identity_owner()
         owner = self.user
         acc = self.directory.get(owner)
         if acc is None or acc.kind is not UserKind.HUMAN:
@@ -139,6 +343,7 @@ class AccountsService:
         )
         return Account.from_dict(doc)
 
+    @_identity_workflow
     def _publish_identity(
         self,
         name: str,
@@ -157,6 +362,7 @@ class AccountsService:
         transport refuses the account row, remove only state minted by this
         attempt so retrying the same name starts cleanly.
         """
+        self._require_legacy_identity_owner()
         pins = self.directory.pins
         prior_fp = pins.fingerprint(name) if pins is not None else ""
         self.keystore.save(name, bundle)
@@ -189,38 +395,21 @@ class AccountsService:
                 pins.forget(name)
             raise
 
-    def _require_free(self, name: str) -> None:
+    def _require_valid_name(self, name: str) -> None:
         if not valid_name(name):
             raise ValidationError(
                 "names are 2-32 chars: lowercase letters, digits, _ or -, "
                 "starting with a letter (reserved words excluded)"
             )
+
+    def _require_free(self, name: str) -> None:
+        self._require_valid_name(name)
         if self.directory.handle_taken(name):
             raise ValidationError(f"@{name} is taken")
 
     # ----------------------------------------------------------------- auth
     def verify_password(self, name: str, password: str) -> bool:
-        doc = self.tx.get_doc(P.user(name))
-        auth = (doc or {}).get("auth") or {}
-        algo = auth.get("algo")
-        try:
-            if algo == "scrypt":
-                salt = base64.b64decode(auth["salt"])
-                expected = base64.b64decode(auth["hash"])
-                return secrets.compare_digest(_scrypt(password, salt), expected)
-            if algo == "pbkdf2":
-                # migrated v1 record (hex salt/hash, sha256, iteration count);
-                # the login flow upgrades it to scrypt after a success
-                import hashlib
-
-                derived = hashlib.pbkdf2_hmac(
-                    "sha256", password.encode("utf-8"),
-                    bytes.fromhex(auth["salt"]), int(auth["iterations"]),
-                )
-                return secrets.compare_digest(derived, bytes.fromhex(auth["hash"]))
-        except (KeyError, ValueError, TypeError):
-            return False
-        return False
+        return _password_matches(self.tx.get_doc(P.user(name)), password)
 
     def upgrade_login(self, name: str, password: str) -> str | None:
         """Bring a migrated v1 account up to v2 on its first successful
@@ -231,6 +420,13 @@ class AccountsService:
         doc = self.tx.get_doc(P.user(name))
         if not isinstance(doc, dict):
             return None
+        if ((doc.get("auth") or {}).get("algo") != "pbkdf2"
+                and (doc.get("keys") or {}).get("sign_pub")):
+            return None
+        return self._upgrade_login_identity(name, password, doc)
+
+    @_identity_workflow
+    def _upgrade_login_identity(self, name: str, password: str, doc: dict) -> str | None:
         changed = False
         code: str | None = None
         auth = doc.get("auth") or {}
@@ -264,6 +460,48 @@ class AccountsService:
         """Re-hash with a fresh salt AND re-wrap the identity bundle under
         the new password in the same operation (D5) — the recovery-code wrap
         is untouched, so the code keeps working."""
+        if self._typed_identity_writer() is not None:
+            return self._change_password_typed(old, new)
+        return self._change_password_legacy(old, new)
+
+    def _change_password_typed(self, old: str, new: str) -> None:
+        """One compare-and-swap of the account document through the bound
+        writer. Salt, hash and wrap are computed once, so every attempt (and
+        exact replay after an unknown outcome) carries identical material."""
+        if not self.verify_password(self.user, old):
+            raise PermissionDenied("current password is incorrect")
+        if len(new or "") < 6:
+            raise ValidationError("password must be at least 6 characters")
+        bundle = self.keystore.load(self.user)
+        if bundle is None:  # locked machine: unwrap with the old password
+            acc = self.directory.get(self.user)
+            wrapped = acc.keys.wrapped_priv if acc else None
+            if wrapped is not None:
+                bundle = crypto.unwrap_bundle(
+                    {"salt": wrapped.salt, "nonce": wrapped.nonce, "ct": wrapped.ct},
+                    old,
+                )
+                self.keystore.save(self.user, bundle)
+        salt = os.urandom(16)
+        auth = {"algo": "scrypt", "salt": _b64(salt), "hash": _b64(_scrypt(new, salt))}
+        rewrapped = crypto.wrap_bundle(bundle, new) if bundle is not None else None
+
+        def build(current):
+            # Bind the swap to the credential just verified, against the exact
+            # document it replaces: a concurrent change elsewhere must win.
+            if not _password_matches(current, old):
+                raise PermissionDenied("current password is incorrect")
+            doc = copy.deepcopy(current)
+            doc["auth"] = auth
+            if rewrapped is not None:
+                doc.setdefault("keys", {})["wrapped_priv"] = rewrapped
+            return doc
+
+        self.tx.update_doc(P.user(self.user), build)
+
+    @_identity_workflow
+    def _change_password_legacy(self, old: str, new: str) -> None:
+        self._require_legacy_identity_owner()
         if not self.verify_password(self.user, old):
             raise PermissionDenied("current password is incorrect")
         if len(new or "") < 6:
@@ -423,7 +661,21 @@ class AccountsService:
         of its authorship to invalidate). A keyed agent whose private bundle
         lives on another machine is refused: minting a replacement key would
         orphan the signatures on its past info events — proper machine moves
-        need published key history (later round)."""
+        need published key history (later round).
+
+        With a bound typed writer a keyed agent moves through the typed
+        lifecycle record and account swap; minting keys for a keyless agent
+        still requires a durable identity owner."""
+        if self._typed_identity_writer() is not None:
+            return self._adopt_agent(agent, typed=True)
+        return self._adopt_agent_legacy(agent)
+
+    @_identity_workflow
+    def _adopt_agent_legacy(self, agent: str) -> Account:
+        self._require_legacy_identity_owner()
+        return self._adopt_agent(agent, typed=False)
+
+    def _adopt_agent(self, agent: str, *, typed: bool) -> Account:
         target = self._writable_target(agent)
         acc = self.directory.get(target)
         has_pubs = bool(acc and acc.keys.sign_pub)
@@ -432,6 +684,10 @@ class AccountsService:
             raise ValidationError(
                 f"@{target}'s identity keys live on its current machine — "
                 f"recreate the agent here instead (key moves come later)"
+            )
+        if not has_pubs and typed:
+            raise ValidationError(
+                "identity mutation requires a durable identity publication owner"
             )
         if not has_pubs:
             bundle = crypto.generate_identity()
@@ -529,7 +785,8 @@ class AccountsService:
             if snap.kind is ChatKind.GROUP and agent in snap.members:
                 # A failed or ambiguous leave cannot justify destroying the
                 # private keys required to recover that membership operation.
-                self.membership.remove_member(snap.id, agent)
+                # A target the fresh meta no longer lists is already done.
+                self.membership.remove_member(snap.id, agent, missing_ok=True)
         at = utcnow_iso()
         self.ensure_lifecycle(agent)
         from .lifecycle import publish_change
@@ -552,7 +809,7 @@ class AccountsService:
         for snap in self.membership.chats_for():
             if snap.kind is ChatKind.GROUP:
                 # Preserve active identity and keys until every leave settles.
-                self.membership.leave(snap.id)
+                self.membership.leave(snap.id, missing_ok=True)
         at = utcnow_iso()
         from .lifecycle import publish_change
 

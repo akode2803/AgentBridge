@@ -218,3 +218,13 @@ This is a separate remaining activation prerequisite, not a callback wrapper.
 Local private-file hardening and local full-owner capacity reservation can land
 independently as inactive prerequisites. Neither establishes provider admission
 progress, safe account compensation, or readiness for startup activation.
+
+## Resolution (2026-10-13, Option B)
+
+Resolved without per-write admission; see PROVIDER_ADMISSION_CHECKPOINT.md,
+"Decision: Option B". The "durable exact non-effect evidence" this document
+asks for is supplied by authenticated closure *combined with* the journal's
+durable-receipt-before-ACK rule, applied only to ticketed attempts. The
+concrete schedule above (full rejection, then rotation) now releases the
+attempted append to its owner instead of stranding it; untracked opaque rows
+keep failing closed.

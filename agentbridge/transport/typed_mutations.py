@@ -32,6 +32,10 @@ _FAMILIES = {
                        "p_expected_source_epoch", "p_expected_state_seq",
                        "p_expected_state_deleted", "p_expected_reaction_seq",
                        "p_expected_reaction_deleted"), ("chat_id", "username")),
+    "meta_append": ("ab_mutation_meta_append",
+                    ("p_chat", "p_data", "p_expected_source_epoch", "p_expected_seq",
+                     "p_expected_deleted", "p_log", "p_records"),
+                    ("chat_id", "log_name")),
     "doc_create": ("ab_mutation_doc_create", ("p_path", "p_data"), ("path",)),
     "doc_delete": ("ab_mutation_doc_delete", ("p_path",), ("path",)),
     "log_append": ("ab_mutation_log_append", ("p_chat", "p_log", "p_record"),
@@ -57,10 +61,28 @@ _EFFECT_PATH = re.compile(
     r"chats/[^/]+/runtime/effects/[^/]+/[^/]+/(?:claim|state-[23])\.json\Z"
 )
 _MAX_JSON_BYTES = 8_355_840
+_MAX_META_RECORDS = 256
+
+
+_PROVIDER_CODE = re.compile(r"[0-9A-Z]{5}|PGRST[0-9]{3}")
 
 
 class TypedMutationRPCError(RuntimeError):
-    """A single typed RPC failed or its identity/response was unsafe."""
+    """A single typed RPC failed or its identity/response was unsafe.
+
+    ``code`` is the SQLSTATE or PostgREST code of a provider error reply, whose
+    request transaction rolled back. None means no such reply: the outcome of
+    the call is unknown, or the failure was local. Messages are never retained.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _provider_code(exc: BaseException) -> str | None:
+    code = getattr(exc, "code", None)
+    return code if type(code) is str and _PROVIDER_CODE.fullmatch(code) else None
 
 
 def _canonical(value: object) -> bytes:
@@ -149,6 +171,11 @@ def _validate_arguments(kind: str, arguments: dict[str, Any]) -> None:
                           log_record=name == "p_record")
         elif name in {"p_state_data", "p_reaction_data"}:
             _bounded_json(value, object_only=True)
+        elif name == "p_records":
+            if type(value) is not list or not 1 <= len(value) <= _MAX_META_RECORDS:
+                raise ValueError("invalid typed meta append records")
+            for record in value:
+                _bounded_json(record, object_only=True, log_record=True)
         elif name in {"p_grant_ask", "p_grant_decision"}:
             if value is not None:
                 _bounded_json(value, object_only=True)
@@ -189,6 +216,18 @@ def _validate_arguments(kind: str, arguments: dict[str, Any]) -> None:
         if sum(_jsonb_size(arguments[name])[0] for name in
                ("p_state_data", "p_reaction_data")) > _MAX_JSON_BYTES:
             raise ValueError("typed reaction pair exceeds provider limit")
+    if kind == "meta_append":
+        # The provider swaps a live meta only; it never creates or revives one.
+        if (arguments["p_expected_seq"] < 1 or arguments["p_expected_deleted"]
+                or type(arguments["p_data"]) is not dict):
+            raise ValueError("invalid typed meta append")
+        # Each line is stored as JSON text and JSON-encoded again for sizing.
+        total = _jsonb_size(arguments["p_data"])[0]
+        for record in arguments["p_records"]:
+            size, escaped = _jsonb_size(record)
+            total += size + escaped + 2
+        if total > _MAX_JSON_BYTES:
+            raise ValueError("typed meta append exceeds provider limit")
     if kind == "effect_transition":
         path = arguments["p_path"]
         if _EFFECT_PATH.fullmatch(path) is None:
@@ -453,9 +492,10 @@ class TypedMutationRPC:
             raw = builder.execute().data
         except TypedMutationRPCError:
             raise
-        except Exception:
+        except Exception as exc:
             self._check_identity()
-            raise TypedMutationRPCError("typed mutation RPC failed") from None
+            raise TypedMutationRPCError("typed mutation RPC failed",
+                                        code=_provider_code(exc)) from None
         self._check_identity()
         return raw
 

@@ -351,7 +351,7 @@ def test_blob_delete_does_not_treat_storage_list_failure_as_missing(
     tx.put_blob("chats/c1/files/f1", b"owned")
     bucket = tx._store()
 
-    def fail_list(_prefix):
+    def fail_list(_prefix, _options=None):
         raise ConnectionError("storage list unavailable")
 
     monkeypatch.setattr(bucket, "list", fail_list)
@@ -360,6 +360,52 @@ def test_blob_delete_does_not_treat_storage_list_failure_as_missing(
     with pytest.raises(ConnectionError, match="list unavailable"):
         tx.delete_blob("chats/c1/files/f1")
     assert tx.get_blob("chats/c1/files/f1") == b"owned"
+
+
+def test_blob_lookup_and_listing_see_past_the_first_storage_page(tx):
+    # Storage returns 100 names per list call. An object sorting after the
+    # 100th must still be found (else delete would skip it and the purge
+    # would orphan it) and listed.
+    for n in range(130):
+        tx.put_blob(f"chats/c1/files/f{n:03d}", b"x" * (n + 1))
+    tx.put_blob("chats/c1/avatar.jpg", b"photo")
+    tx.put_blob("chats/c10/files/other", b"sibling chat")
+    assert tx.blob_size("chats/c1/files/f129") == 130
+    assert tx.blob_size("chats/c1/files/f12") is None  # f120..f129 only share a prefix
+    listed = tx.list_blobs("chats/c1")
+    assert len(listed) == 131 and "chats/c1/avatar.jpg" in listed
+    assert "chats/c1/files/f129" in listed and "chats/c10/files/other" not in listed
+    tx.delete_blob("chats/c1/files/f129")
+    assert tx.blob_size("chats/c1/files/f129") is None
+    assert tx.list_blobs("chats/none") == []
+    # Storage's search matches case-insensitively, so 100 case variants can
+    # sort ahead of the exact name and push it to a later page.
+    for n in range(100):
+        tx.put_blob(f"chats/c2/files/F7-{n:03d}", b"v")
+    tx.put_blob("chats/c2/files/f7", b"exact")
+    assert tx.blob_size("chats/c2/files/f7") == 5
+    # A 0-byte object is still present (a skipped delete would keep the
+    # folder non-empty and stall the purge forever).
+    tx.put_blob("chats/c1/files/empty", b"")
+    tx.delete_blob("chats/c1/files/empty")
+    assert "chats/c1/files/empty" not in tx.list_blobs("chats/c1")
+
+
+def test_batched_blob_delete_removes_100_exact_keys_a_call(tx, monkeypatch):
+    for n in range(150):
+        tx.put_blob(f"chats/c1/files/f{n:03d}", b"x")
+    tx.put_blob("chats/c1/files/f000x", b"shares a prefix")
+    bucket = tx._store()
+    real_remove, calls = bucket.remove, []
+    monkeypatch.setattr(bucket, "remove", lambda keys: calls.append(list(keys))
+                        or real_remove(keys))
+    monkeypatch.setattr(tx._client.storage, "from_", lambda _name: bucket)
+    tx.delete_blobs([f"chats/c1/files/f{n:03d}" for n in range(150)])
+    assert [len(keys) for keys in calls] == [100, 50]
+    assert all(key.startswith(tx.root + "/chats/c1/files/") for keys in calls for key in keys)
+    assert tx.list_blobs("chats/c1") == ["chats/c1/files/f000x"]
+    tx.delete_blobs([])  # nothing to do, no call
+    assert len(calls) == 2
 
 
 def test_blob_delete_requires_exact_storage_confirmation(tx, monkeypatch):
@@ -494,14 +540,18 @@ def test_realtime_property_drop_closes_channel_and_socket(monkeypatch):
 
     class RealtimeClient:
         def __init__(self): self.closed = False
+        async def set_auth(self, _token): pass
         async def close(self): self.closed = True
 
     class Client:
         def __init__(self):
             self.ch = Channel()
             self.realtime = RealtimeClient()
+            self.options = None
 
-        def channel(self, *_args): return self.ch
+        def channel(self, _name, options):
+            self.options = options
+            return self.ch
 
     client = Client()
     metrics = []
@@ -516,11 +566,13 @@ def test_realtime_property_drop_closes_channel_and_socket(monkeypatch):
         types.SimpleNamespace(RealtimeChannelOptions=lambda **kwargs: kwargs))
     rt = _RealtimeThread(
         {"SUPABASE_URL": "https://x.test", "SUPABASE_PUBLISHABLE_KEY": "pk"},
-        "team", lambda: wakes.append("disconnect"), metrics.append)
+        "team", lambda: wakes.append("disconnect"), metrics.append,
+        auth_mode="member:test", token_source=lambda: "member-token")
     deadline = time.monotonic() + 2.0
     while rt.status() != "ready" and time.monotonic() < deadline:
         time.sleep(0.01)
     assert rt.status() == "ready"
+    assert client.options["config"]["private"] is True
     rt._subscription_status("SUBSCRIBED", None)
     assert metrics.count("rt_ready") == 1
     client.ch.is_joined = False
@@ -604,15 +656,16 @@ def test_realtime_ledger_authenticates_and_waits_for_all_readiness(monkeypatch):
         "SUPABASE_MEMBER_EMAIL": "member@example.test",
         "SUPABASE_MEMBER_PASSWORD": "secret",
     }, "team", lambda: None, metrics.append, observe_ledger=True,
-       on_ledger_event=events.append, ledger_auth_mode="member:test")
+       on_ledger_event=events.append, auth_mode="member:test",
+       token_source=lambda: "member-token")
     deadline = time.monotonic() + 2.0
     while (client.ch.system is None or rt.status() != "ready") \
             and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert client.auth.credentials == [{
-        "email": "member@example.test", "password": "secret",
-    }]
+    # The PostgREST session's token, not a second password sign-in.
+    assert client.auth.credentials == []
     assert client.realtime.tokens == ["member-token"]
+    assert client.options["config"]["private"] is True
     assert client.options["config"]["broadcast"]["replication_ready"] is True
     assert client.ch.binding[1] == {
         "table": "ab_change_events", "schema": "public", "filter": "root=eq.team",
@@ -634,7 +687,7 @@ def test_realtime_ledger_authenticates_and_waits_for_all_readiness(monkeypatch):
     assert client.auth.closed is True
 
 
-def test_realtime_member_auth_failure_does_not_silently_use_service_key(monkeypatch):
+def test_realtime_member_without_token_does_not_use_service_key(monkeypatch):
     from agentbridge.transport.supabase import _RealtimeThread
 
     keys = []
@@ -669,11 +722,11 @@ def test_realtime_member_auth_failure_does_not_silently_use_service_key(monkeypa
         "SUPABASE_MEMBER_EMAIL": "member@example.test",
         "SUPABASE_MEMBER_PASSWORD": "bad",
     }, "team", lambda: None, observe_ledger=True,
-       ledger_auth_mode="member:test")
+       auth_mode="member:test", token_source=lambda: "")
     deadline = time.monotonic() + 2.0
     while rt.alive() and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert keys == ["pk"]
+    assert keys == []
     assert rt.status() == "disconnected"
     rt.close()
 
@@ -692,7 +745,8 @@ def test_realtime_close_cancels_initial_connection(monkeypatch):
         types.SimpleNamespace(RealtimeChannelOptions=lambda **kwargs: kwargs))
     rt = _RealtimeThread(
         {"SUPABASE_URL": "https://x.test", "SUPABASE_PUBLISHABLE_KEY": "pk"},
-        "team", lambda: None)
+        "team", lambda: None, auth_mode="member:test",
+        token_source=lambda: "member-token")
     deadline = time.monotonic() + 1.0
     while rt._task is None and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -717,9 +771,117 @@ def test_realtime_immediate_close_cannot_start_late_connection(monkeypatch):
         types.SimpleNamespace(RealtimeChannelOptions=lambda **kwargs: kwargs))
     rt = _RealtimeThread(
         {"SUPABASE_URL": "https://x.test", "SUPABASE_PUBLISHABLE_KEY": "pk"},
-        "team", lambda: None)
+        "team", lambda: None, auth_mode="member:test",
+        token_source=lambda: "member-token")
     rt.close()
     assert not rt._thread.is_alive()
+
+
+def test_realtime_forwards_a_refreshed_member_token(monkeypatch):
+    """Realtime disconnects when the joined token expires, so each token the
+    PostgREST client refreshes is sent to the joined channel."""
+    from agentbridge.transport import supabase as mod
+
+    monkeypatch.setattr(mod, "_RT_TOKEN_CHECK_S", 0.0)
+
+    class Channel:
+        is_joined = True
+        is_errored = False
+        def on_broadcast(self, *_args): return self
+        async def subscribe(self, callback):
+            callback("SUBSCRIBED", None)
+            return self
+        async def unsubscribe(self): pass
+
+    class RealtimeClient:
+        def __init__(self): self.tokens = []
+        async def set_auth(self, token): self.tokens.append(token)
+        async def close(self): pass
+
+    class Client:
+        def __init__(self):
+            self.realtime = RealtimeClient()
+        def channel(self, *_args): return Channel()
+
+    client = Client()
+
+    async def create_client(*_args): return client
+
+    monkeypatch.setitem(
+        sys.modules, "supabase", types.SimpleNamespace(acreate_client=create_client))
+    monkeypatch.setitem(
+        sys.modules, "realtime",
+        types.SimpleNamespace(RealtimeChannelOptions=lambda **kwargs: kwargs))
+    tokens = ["first"]
+    rt = mod._RealtimeThread(
+        {"SUPABASE_URL": "https://x.test", "SUPABASE_PUBLISHABLE_KEY": "pk"},
+        "team", lambda: None, auth_mode="member:test",
+        token_source=lambda: tokens[-1])
+    deadline = time.monotonic() + 2.0
+    while rt.status() != "ready" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    tokens.append("second")
+    deadline = time.monotonic() + 3.0
+    while client.realtime.tokens[-1:] != ["second"] and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert client.realtime.tokens == ["first", "second"]
+    rt.close()
+
+
+def test_realtime_refused_join_backs_off_for_minutes(monkeypatch):
+    from agentbridge.transport import supabase as mod
+
+    now = [100.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: now[0])
+    made = []
+
+    class FakeRealtime:
+        def __init__(self, *_args, **_kwargs):
+            self.live = True
+            made.append(self)
+        def alive(self): return self.live
+        def status(self): return "ready" if self.live else "disconnected"
+        def refused(self): return True
+        def close(self): pass
+
+    monkeypatch.setattr(mod, "_RealtimeThread", FakeRealtime)
+    tx = SupabaseTransport(
+        "team", env={"SUPABASE_URL": "https://x.test",
+                     "SUPABASE_SECRET_KEY": "sb_secret_x"}, client=FakeClient())
+    tx._ensure_rt().live = False
+    assert tx._ensure_rt() is None
+    assert tx._rt_retry_at - now[0] == mod._RT_REFUSED_BACKOFF_S == 300.0
+    assert len(made) == 1
+
+
+def test_realtime_refusal_is_recognised_from_the_join_error():
+    from agentbridge.transport.supabase import _authorization_refusal
+
+    assert _authorization_refusal(Exception(
+        '{"reason": "Unauthorized: You do not have permissions to read from '
+        'this Channel topic: ab-team"}'))
+    assert not _authorization_refusal(Exception('{"reason": "timeout"}'))
+    # Seen on Scratch 2026-10-17: the first private join before Realtime
+    # made its daily partitions. It heals by itself, so retry fast.
+    assert not _authorization_refusal(Exception(
+        '{"reason": "MissingPartition: Realtime was unable to find the '
+        'expected messages partition"}'))
+    assert not _authorization_refusal(None)
+
+
+def test_realtime_needs_an_identity(monkeypatch):
+    """No member session and no service key: poll-only, no anonymous join."""
+    from agentbridge.transport import supabase as mod
+
+    made = []
+    monkeypatch.setattr(mod, "_RealtimeThread",
+                        lambda *args, **kwargs: made.append(args))
+    tx = SupabaseTransport(
+        "team", env={"SUPABASE_URL": "https://x.test",
+                     "SUPABASE_PUBLISHABLE_KEY": "pk"}, client=FakeClient())
+    tx.auth_mode = "member-signin-FAILED"
+    assert tx._ensure_rt() is None
+    assert made == []
 
 
 # ------------------------------------------------- doc delta feed (R76/V84)
@@ -801,8 +963,8 @@ def test_delete_chat_tombstones_ride_the_feed(tx):
 
 
 def test_purge_deleted_docs_drops_only_old_tombstones(tx):
-    tx.put_doc("users/a.json", {"v": 1})
-    tx.delete_doc("users/a.json")
+    tx.put_doc("status/a.json", {"v": 1})
+    tx.delete_doc("status/a.json")
     rows = tx._client.db["ab_docs"]
     assert any(r.get("deleted") for r in rows)
     tx.purge_deleted_docs(30.0)                   # too young: kept
@@ -812,7 +974,23 @@ def test_purge_deleted_docs_drops_only_old_tombstones(tx):
             r["updated"] = "2000-01-01T00:00:00Z"
     tx.purge_deleted_docs(30.0)
     assert not any(r.get("deleted") for r in tx._client.db["ab_docs"])
-    assert tx.get_doc("users/a.json") is None
+    assert tx.get_doc("status/a.json") is None
+
+
+def test_purge_keeps_account_tombstones(tx):
+    """An account row keeps its name taken forever
+    (docs/NAME_RETENTION_AND_PRIVATE_POKES.md), so the purge skips users/."""
+    tx.put_doc("users/a.json", {"v": 1})
+    tx.put_doc("status/b.json", {"v": 1})
+    tx.delete_doc("users/a.json")
+    tx.delete_doc("status/b.json")
+    for r in tx._client.db["ab_docs"]:
+        if r.get("deleted"):
+            r["updated"] = "2000-01-01T00:00:00Z"
+    tx.purge_deleted_docs(30.0)
+    left = {r["path"] for r in tx._client.db["ab_docs"] if r.get("deleted")}
+    assert left == {"users/a.json"}
+    assert tx.get_doc("users/a.json") is None     # still a tombstone
 
 
 def test_legacy_schema_falls_back_and_upgrades_live():

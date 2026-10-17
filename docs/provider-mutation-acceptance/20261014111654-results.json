@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-10-14T11:16:54Z",
+  "project_id": "riagjoluhcwjvmfchbzl",
+  "project_name": "AgentBridge Scratch",
+  "postgresql_version": "17.11",
+  "migration": {
+    "version": "20261014111654",
+    "name": "agentbridge_p1b_terminal_readers",
+    "statement_bytes": 13231,
+    "statement_sha256": "9f297f751e5ec8e56e11620bb38f2c33ceb6093f27ba15ea034c09c272561562",
+    "function_body_sha256_prefix": {
+      "public.ab_can_read_chat": "f07231d763663480",
+      "public.ab_chat_terminal_reader": "81d57ecddcb81175",
+      "public.ab_staged_blob_readable": "baf41ab5b6c5f529",
+      "public.ab_mutation_chat_delete": "253fed90e3e2b496",
+      "public.ab_mutation_meta_append": "ec191f1b8ce85a84"
+    },
+    "policy_qual_sha256_prefix": {
+      "storage.objects ab_blobs_member_delete": "bd5d3e6f9dc53763"
+    },
+    "not_applied": "the doc-change trigger function's final_members watch (Scratch has no private.ab_record_doc_change)"
+  },
+  "supersedes_scratch_migration": {
+    "version": "20261014103831",
+    "field": "who reads, cleans and purges a deleted room; what a purged room answers",
+    "reason": "a deleted room stayed readable (and its Storage objects listable and deletable) by everyone who was ever a member, including members who left long before the deletion, and a purged room's meta_append refused never-members differently from tenure members; now the deletion records final_members and only they read, clean and purge it (older deletions without the key fall back to tenure), and once purged every root member gets the same answer (DECISIONS D-017, D-018)"
+  },
+  "post_migration_shape": {
+    "security_definer": true,
+    "mutation_rpcs_search_path": "pg_catalog",
+    "predicates_search_path": "public",
+    "mutation_rpcs_execute_anon": false,
+    "mutation_rpcs_execute_authenticated": true,
+    "mutation_rpcs_execute_service_role": false,
+    "predicates_execute_anon": "true via Supabase default privileges (revoke from public does not remove it); without a uid they answer false"
+  },
+  "acceptance": {
+    "file": "20261014111654-acceptance.sql",
+    "statement_bytes": 9256,
+    "statement_sha256": "10fb03e5b5e870cd8c64c92c3f88d1e97abea407784d966de3935a5d1446329b",
+    "transaction": "single DO block ending in a P0001 raise carrying the observations; residue afterwards: 0 members, roots, docs, logs, receipts, change epochs and Storage object rows",
+    "delete_policy_method": "Scratch blocks direct DELETEs on storage.objects with a statement trigger, so the policy's exact pg_policies expression was evaluated per principal",
+    "observations": {
+      "reads": {
+        "final": {"room": true, "legacy": true},
+        "uploader": {"room": true, "legacy": false},
+        "departed": {"room": false, "legacy": true},
+        "outsider": {"room": false, "legacy": false}
+      },
+      "sees": {
+        "final": {"staged": 1, "file": 1, "live": 0},
+        "uploader": {"staged": 1, "file": 1, "live": 1},
+        "departed": {"staged": 0, "file": 0, "live": 0},
+        "outsider": {"staged": 0, "file": 0, "live": 0}
+      },
+      "delete_policy": {
+        "final": {"staged": 1, "file": 1, "live": 0},
+        "uploader": {"staged": 1, "file": 1, "live": 1},
+        "departed": {"staged": 0, "file": 0, "live": 0},
+        "outsider": {"staged": 0, "file": 0, "live": 0}
+      },
+      "purge_departed": "42501 typed chat delete is unauthorized",
+      "purge_stranger": "42501 typed chat delete is unauthorized",
+      "purge_final": {"chat_id": "room", "logs_deleted": 1, "documents_tombstoned": 2},
+      "reads_after_purge_final": true,
+      "purge_again_uploader": {"chat_id": "room", "logs_deleted": 0, "documents_tombstoned": 0},
+      "purge_again_outsider": {"chat_id": "room", "logs_deleted": 0, "documents_tombstoned": 0},
+      "append_after_purge_departed": {"applied": false},
+      "append_after_purge_outsider": {"applied": false},
+      "append_after_purge_stranger": "42501 meta append is unauthorized",
+      "room_log_lines_after": 0,
+      "room_docs_live_after": 0
+    }
+  },
+  "limits": {
+    "hosted_concurrent_holder_waiter_acceptance": false,
+    "real_storage_http_listing_acceptance": false,
+    "production_touched": false,
+    "application_activated": false
+  }
+}

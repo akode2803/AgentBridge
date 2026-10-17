@@ -1,0 +1,68 @@
+{
+  "acceptance_sql": "20261017-name-retention-acceptance.sql",
+  "acceptance_sql_sha256": "1c6db8d18b290fb03f9fc89c15c9d4137e92ab0eb77821537d36e2983d2317c0",
+  "check": "name retention, one owner per name, private poke policies",
+  "date": "2026-10-17",
+  "design": "docs/NAME_RETENTION_AND_PRIVATE_POKES.md",
+  "notes": [
+    "Scratch has no ab_members/ab_docs policies (built from the protocol sections), so the block installs the production policies verbatim inside its rolled-back transaction.",
+    "A first run inserted into realtime.messages to exercise the policies directly; Scratch has no messages partition (Realtime creates them, postgres may not), so section 7 now checks the stored policies and evaluates their topic expression per login. The live join belongs to the HTTP check.",
+    "topic_ok_carol is true because carol claimed a fresh name in the same transaction, making her an active member."
+  ],
+  "observed": {
+    "account_hard_delete_rows": 0,
+    "account_row_kept": "1",
+    "after_revoke": {
+      "chat_docs": 0,
+      "member": "",
+      "poke_topic": false,
+      "root_ok": false,
+      "roster_rows": 0
+    },
+    "alice_topics": {
+      "bare_prefix": false,
+      "longer_root": false,
+      "own": true,
+      "shorter_root": false,
+      "wrong_prefix": false
+    },
+    "before_revoke": {
+      "chat_docs": 1,
+      "member": "bob",
+      "poke_topic": true
+    },
+    "claim_agent_name": "55000 name belongs to an existing account",
+    "claim_fresh_name": "accepted",
+    "claim_held_name": "23505 duplicate key value violates unique constraint \"ab_members_pkey\"",
+    "foreign_account_doc": "55000 name is claimed by another login",
+    "own_and_agent_docs": "accepted",
+    "owner_delete": "55000 a claimed name is never freed; revoke it instead",
+    "policies": {
+      "ab_poke_receive": {
+        "cmd": "SELECT",
+        "expression": "((extension = 'broadcast'::text) AND ( SELECT ab_poke_topic_ok(( SELECT realtime.topic() AS topic)) AS ab_poke_topic_ok))",
+        "roles": "{authenticated}"
+      },
+      "ab_poke_send": {
+        "cmd": "INSERT",
+        "expression": "((extension = 'broadcast'::text) AND ( SELECT ab_poke_topic_ok(( SELECT realtime.topic() AS topic)) AS ab_poke_topic_ok))",
+        "roles": "{authenticated}"
+      }
+    },
+    "self_delete_rows": 0,
+    "self_update_rows": 0,
+    "topic_ok_alice": true,
+    "topic_ok_bob": false,
+    "topic_ok_carol": true,
+    "unrevoke": "55000 a revoked name stays revoked"
+  },
+  "project": "AgentBridge Scratch (riagjoluhcwjvmfchbzl)",
+  "residue_after_rollback": {
+    "docs": 0,
+    "members": 0,
+    "realtime_policies": 2,
+    "table_policies": 0
+  },
+  "result": "passed",
+  "schema_applied": "migration name_retention_private_pokes_20261017: the changed statements of docs/supabase_schema.sql (revoked_at, ab_member, the dropped self-delete policy, kind_permits, lock_actor, member_leave, and the name-retention section), comments omitted"
+}

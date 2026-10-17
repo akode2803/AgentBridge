@@ -21,7 +21,10 @@ a subdirectory can't import ``agentbridge`` either):
         ...supabase_admin seed <username> [--install|--out FILE]
                                           mint a credential for a machine
                                           that can't run join itself
-        ...supabase_admin revoke <username>   eviction (row + auth user)
+        ...supabase_admin revoke <username> --permanent
+                                          eviction: the row is revoked (the
+                                          name is never reused) and the auth
+                                          user deleted
 
 ``join`` is also the primitive the app's account-creation flow calls when
 the setup overhaul lands (V-2026-07-16: "create a user key during the
@@ -31,6 +34,11 @@ the Supabase identity in the same breath.
 One-time dashboard prerequisites for ``join``: email signup enabled, email
 confirmations OFF (the addresses are synthetic; an auth user with no
 ``ab_members`` row can see and touch nothing).
+
+A sealed root refuses direct ``ab_members`` writes, so ``join`` and ``seed``
+claim there through the typed, receipt-bearing RPC (``member_claim.py``);
+an unsealed root keeps the legacy insert. Eviction under a seal needs a typed
+operator flow that does not exist yet, so ``revoke`` refuses it unchanged.
 """
 
 from __future__ import annotations
@@ -38,6 +46,7 @@ from __future__ import annotations
 import argparse
 import secrets
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ..core.config import DEFAULT_HOME, load_app_config, validate_root_spec
@@ -92,6 +101,35 @@ def _write_env_lines(path: Path, email: str, password: str) -> None:
     tmp.replace(path)
 
 
+_SEALED = "legacy provider writes are sealed"
+
+
+def _sealed_claim(env: dict[str, str], email: str, password: str, root: str,
+                  username: str, uid: str, *, rerun: str) -> str:
+    """Claim as this member through the typed RPC when the root is sealed.
+
+    Returns ``unsealed`` when the root still takes the legacy insert. Every
+    failure names ``rerun``, which replays the same operation.
+    """
+    from .member_claim import MemberClaimError, claim_member, open_member_rpc
+
+    # Never let a service key stand in for the member: the claim is the
+    # member's own act, and typed RPCs refuse a service session anyway.
+    member_env = {k: v for k, v in env.items() if k != "SUPABASE_SECRET_KEY"}
+    member_env.update(SUPABASE_MEMBER_EMAIL=email, SUPABASE_MEMBER_PASSWORD=password)
+    try:
+        rpc = open_member_rpc(member_env, root, str(uid))
+    except Exception:  # noqa: BLE001 - never echo provider/auth details
+        raise SystemExit(f"could not open @{username}'s session for the "
+                         f"claim — {rerun}") from None
+    try:
+        return claim_member(rpc, username)
+    except MemberClaimError as exc:
+        if exc.reason == "taken":
+            raise SystemExit(str(exc)) from None
+        raise SystemExit(f"claim did not finish ({exc}) — {rerun}") from None
+
+
 # ------------------------------------------------------------ the commands
 def join_mesh(env: dict[str, str], username: str, root: str,
               env_path: Path) -> None:
@@ -132,20 +170,35 @@ def join_mesh(env: dict[str, str], username: str, root: str,
             raise SystemExit(
                 f"{email} already has an auth user this machine holds no "
                 f"password for (a half-finished join, or confirmations "
-                f"were ON). Ask the owner to run: supabase_admin revoke "
-                f"{username} — then rerun join.")
+                f"were ON). Ask the owner to run: supabase_admin seed "
+                f"{username} --out FILE, and install that credential here. "
+                f"Do not revoke: a revoked name is never reused.")
         session = res
 
     # 2. the credential works — install it NOW (a failed claim below must
     #    never strand a working sign-in with a lost password again)
     _write_env_lines(env_path, email, password)
 
-    # 3. claim the username (the PK arbitrates; ours-already = done).
-    #    returning="minimal" is LOAD-BEARING: the default representation
-    #    return must pass the SELECT policy too, and its membership lookup
-    #    cannot see the row being born in this same statement (42501 on a
-    #    perfectly valid claim — the second live failure).
+    # 3. claim the username (the PK arbitrates; ours-already = done). A
+    #    sealed root takes only the typed claim, keyed to replay exactly.
     uid = session.user.id
+    if _sealed_claim(env, email, password, root, username, uid,
+                     rerun="your credential is installed; rerun join to "
+                           "resume") == "unsealed":
+        _legacy_claim(client, root, username, uid)
+    print(f"@{username} joined {root}; credential installed into {env_path}")
+    print("restart the app — the Connection panel should say "
+          f"'Member ({username})'")
+
+
+def _legacy_claim(client, root: str, username: str, uid: str) -> None:
+    """The unsealed self-claim; an existing row of ours is success.
+
+    returning="minimal" is LOAD-BEARING: the default representation return
+    must pass the SELECT policy too, and its membership lookup cannot see the
+    row being born in this same statement (42501 on a perfectly valid claim —
+    the second live failure).
+    """
     try:
         client.table("ab_members").insert({
             "root": root, "username": username, "uid": uid,
@@ -166,16 +219,20 @@ def join_mesh(env: dict[str, str], username: str, root: str,
                 "the ab_members table is missing — paste "
                 "docs/supabase_schema.sql first, then rerun join "
                 "(your credential is installed and will be reused)")
+        elif "belongs to an existing account" in msg:
+            raise SystemExit(f"@{username} belongs to an existing account on "
+                             f"{root} and cannot be claimed")
         elif "duplicate" in msg.lower() or "23505" in msg:
             raise SystemExit(f"@{username} is already claimed on {root} "
                              f"by someone else")
+        elif _SEALED in msg:
+            # The root was sealed after the typed probe read it as unsealed.
+            raise SystemExit("this root was just sealed — your credential is "
+                             "installed; rerun join to claim the typed way")
         else:
             raise SystemExit(
                 f"claim failed ({msg[:120]}) — your credential is "
                 f"installed; rerun join after fixing the cause")
-    print(f"@{username} joined {root}; credential installed into {env_path}")
-    print("restart the app — the Connection panel should say "
-          f"'Member ({username})'")
 
 
 def seed(env: dict[str, str], username: str, root: str) -> tuple[str, str]:
@@ -186,6 +243,8 @@ def seed(env: dict[str, str], username: str, root: str) -> tuple[str, str]:
     email = _member_email(username, root)
     password = secrets.token_urlsafe(24)
     existing = _find_user(client.auth.admin, email)
+    _require_seedable(client, root, username,
+                      existing.id if existing is not None else None)
     if existing is not None:
         client.auth.admin.update_user_by_id(existing.id, {
             "password": password, "email_confirm": True})
@@ -194,18 +253,58 @@ def seed(env: dict[str, str], username: str, root: str) -> tuple[str, str]:
         res = client.auth.admin.create_user({
             "email": email, "password": password, "email_confirm": True})
         uid = res.user.id
-    client.table("ab_members").upsert({
-        "root": root, "username": username, "uid": uid,
-    }).execute()
+    # A sealed root takes only the member's own typed claim, made here by
+    # signing in as the member with the publishable key.
+    if env.get("SUPABASE_PUBLISHABLE_KEY") and _sealed_claim(
+            env, email, password, root, username, uid,
+            rerun="rerun seed to resume") != "unsealed":
+        return email, password
+    try:
+        client.table("ab_members").upsert({
+            "root": root, "username": username, "uid": uid,
+        }).execute()
+    except Exception as e:  # noqa: BLE001 - classify only the seal
+        if _SEALED in str(e):
+            raise SystemExit("this root is sealed: seed claims as the member "
+                             "itself, which needs SUPABASE_PUBLISHABLE_KEY in "
+                             "supabase.env — add it, then rerun seed") from None
+        raise
     return email, password
 
 
+def _require_seedable(client, root: str, username: str, uid) -> None:
+    """Refuse to seed over a name that is revoked or held by another login:
+    names are never freed (docs/NAME_RETENTION_AND_PRIVATE_POKES.md)."""
+    rows = (client.table("ab_members").select("uid,revoked_at")
+            .eq("root", root).eq("username", username).execute().data or [])
+    if not rows:
+        return
+    row = rows[0]
+    if row.get("revoked_at"):
+        raise SystemExit(f"@{username} was revoked on {root}; a revoked name "
+                         f"is never reused, so choose a new name")
+    if uid is None or str(row.get("uid")) != str(uid):
+        raise SystemExit(f"@{username} is held on {root} by another login; "
+                         f"names are never reused")
+
+
 def revoke(env: dict[str, str], username: str, root: str) -> bool:
-    """Owner-only: eviction — the members row AND the auth user. The
-    evictee's chats stay closed either way (meta ACLs + E2EE epochs)."""
+    """Owner-only, permanent: eviction marks the members row revoked (the
+    name is never freed, docs/NAME_RETENTION_AND_PRIVATE_POKES.md) and
+    deletes the auth user. The evictee's chats stay closed either way
+    (meta ACLs + E2EE epochs)."""
     client = _client(env, admin=True)
-    client.table("ab_members").delete().eq("root", root) \
-        .eq("username", username).execute()
+    try:
+        revoked_at = datetime.now(timezone.utc).isoformat()
+        client.table("ab_members").update({"revoked_at": revoked_at}) \
+            .eq("root", root).eq("username", username) \
+            .is_("revoked_at", "null").execute()
+    except Exception as e:  # noqa: BLE001 - classify only the seal
+        if _SEALED in str(e):
+            # Nothing changed: the row update is the first step.
+            raise SystemExit("this root is sealed: eviction needs the typed "
+                             "operator flow, which is not built yet") from None
+        raise
     existing = _find_user(client.auth.admin, _member_email(username, root))
     if existing is None:
         return False
@@ -225,8 +324,11 @@ def main(argv: list[str] | None = None) -> int:
     p_seed.add_argument("--install", action="store_true",
                         help="write the credential into THIS machine's supabase.env")
     p_seed.add_argument("--out", default="", help="write the env lines to a file")
-    p_rev = sub.add_parser("revoke", help="owner: evict a member (service key)")
+    p_rev = sub.add_parser(
+        "revoke", help="owner: evict a member for good (service key)")
     p_rev.add_argument("username")
+    p_rev.add_argument("--permanent", action="store_true",
+                       help="confirm: the name is never reused afterwards")
     args = ap.parse_args(argv)
 
     home = Path(args.home) if args.home else None
@@ -257,8 +359,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"SUPABASE_MEMBER_EMAIL={email}")
             print(f"SUPABASE_MEMBER_PASSWORD={password}")
     elif args.cmd == "revoke":
+        if not args.permanent:
+            ap.error(f"revoking @{name} is permanent: the name is never "
+                     "reused. Rerun with --permanent to confirm; to replace "
+                     "a lost password, use seed instead")
         gone = revoke(env, name, root)
-        print(f"@{name}: " + ("revoked" if gone else "members row cleared; "
+        print(f"@{name}: " + ("revoked" if gone else "members row revoked; "
                               "no auth user found"))
     return 0
 

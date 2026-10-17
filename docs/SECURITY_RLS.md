@@ -72,7 +72,8 @@ on the app *is* joining the mesh, at both layers:
 ```
 new machine:      supabase_admin join <username>     (URL + publishable key + root)
 owner (rarely):   supabase_admin seed <username>     (mint for a machine that can't join)
-                  supabase_admin revoke <username>   (eviction; service key)
+                  supabase_admin revoke <username> --permanent
+                                                     (eviction; service key)
 ```
 
 `join` is also the primitive the app's account-creation flow calls once
@@ -154,9 +155,11 @@ account→member→machine ownership map the DB doesn't have yet.
 ### What deliberately stays open
 
 - **Realtime pokes**: the broadcast channel carries `{"r": 1}` — nothing
-  else (SCALING.md §3). Anyone with the publishable key could subscribe to
-  poke *timing* or send fake pokes (bounded cost: hints are garnish, polls
-  are floored). Private channels + `realtime.messages` policies later.
+  else (SCALING.md §3). Since 2026-10-17 the channel is private: policies
+  on `realtime.messages` let only active members of the root join or send,
+  once "Allow public access" is off in the Realtime settings
+  (docs/NAME_RETENTION_AND_PRIVATE_POKES.md). A revoked member drops off
+  within one token lifetime.
 - **Write ownership inside a chat**: any member can upsert any doc under a
   chat they're in (same as v1; the signed log + fold reject forgeries at
   read time). Per-doc author checks would need doc-level claims.
@@ -177,8 +180,9 @@ member session as PostgreSQL 42501 ("new row violates row-level security")
 instead of an explicit JWT error. The transport treats only that exact shape
 as an auth candidate: one fresh password sign-in, then one normal retry under
 the unchanged policy. Persistent 42501 remains denied; re-auth never loops and
-never falls back to the service key. The poke channel always prefers the
-publishable key (it's public + content-free). The Connection panel shows the
+never falls back to the service key. The private poke channel joins as the
+same identity: the member session's own token (no second sign-in), or the
+service key in service mode; with neither it stays off. The Connection panel shows the
 honest mode: `Access · ✓ Member (aryan)` vs `Service key — shared, bypasses
 row security`.
 
@@ -213,8 +217,9 @@ response-lost retry; a conflicting duplicate remains a unique-key error.
 4. **Restart each machine's app** (About → Updates → Restart app) and
    check the Connection panel says `Member (…)`.
 5. **Verify** with a scratch `join`ed identity — global lanes readable, a
-   chat it is not in invisible, a foreign root invisible. Then `revoke` the
-   scratch identity.
+   chat it is not in invisible, a foreign root invisible. Then `revoke
+   --permanent` the scratch identity. Names are never freed (2026-10-17), so
+   use a throwaway name: it stays taken.
 6. **Remove `SUPABASE_SECRET_KEY`** from both machines' `supabase.env`.
    Keep it ONLY wherever the owner administers from (it is now the
    offline root credential, like a CA key). Restart once more.

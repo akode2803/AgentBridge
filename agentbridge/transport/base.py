@@ -406,6 +406,20 @@ class Transport(ABC):
         """Remove ONE stored blob (the storage janitor, V63). Default: not
         supported — the janitor then reclaims nothing on this transport."""
 
+    def delete_blobs(self, paths: list[str]) -> None:
+        """Remove many stored blobs, idempotently and best effort (list again
+        to know what remains). Default: one at a time."""
+        for path in paths:
+            self.delete_blob(path)
+
+    def list_blobs(self, prefix: str) -> list[str]:
+        """Every stored blob path under the folder ``prefix`` (exact folder,
+        recursive, complete). The janitor lists a deleted chat's own folders
+        only after its signed fold proved the deletion, and purges the chat
+        only once they list empty, so a transport that cannot list must say
+        so rather than answer empty."""
+        raise NotImplementedError("this transport cannot list blobs")
+
     def local_path(self, path: str) -> Path | None:
         """Optional local byte-path seam for internal owners; API-backed production
         storage returns None and downloads attachments separately."""

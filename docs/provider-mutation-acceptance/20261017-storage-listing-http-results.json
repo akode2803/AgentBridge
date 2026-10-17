@@ -1,0 +1,45 @@
+{
+ "check": "HTTP half of the hosted Storage listing check",
+ "project": "AgentBridge Scratch (riagjoluhcwjvmfchbzl)",
+ "date": "2026-10-17",
+ "run_by": "Aryan, on his machine with the two Scratch logins (Claude does not sign in with passwords)",
+ "script": "devtools/validate_blob_storage_http.py",
+ "script_sha256": "c9c7f9b8e2ce0e19d174bcc62aec10f1d961565c9da4f3671bf10ceceee6d93b",
+ "command": "validate_blob_storage_http.py listing --root storage-listing-http-20261014 --chat room",
+ "what_it_does": [
+  "owner uploads 150 files under chats/room/files, chats/room/avatar.png and an unexpected nested chats/room/odd/deep/x (152 room objects)",
+  "reader uploads 3 unpublished objects under blob-stage/room",
+  "each login walks the janitor's three folders with the production SupabaseTransport.list_blobs",
+  "exact-name search finds f105, past the first page of 100",
+  "owner removes the reader's staged keys (hidden by RLS): an empty success that changes nothing",
+  "owner removes the room objects in calls of 100 keys, as the janitor does; reader removes its staged keys",
+  "both listings are empty afterwards"
+ ],
+ "observed": {
+  "result": "passed",
+  "owner_id": "a677fbdd-979f-4faa-9a88-8d5532f1947d",
+  "reader_id": "c6ef5d0c-162f-419d-aa50-d9995ff0b20d",
+  "room_objects": 152,
+  "staged_objects": 3,
+  "owner_listed": 152,
+  "reader_listed": 155,
+  "exact_search_past_first_page": true,
+  "rls_hidden_remove_rows": [
+   0
+  ],
+  "batched_remove_rows": [
+   100,
+   52
+  ],
+  "staged_remove_rows": [
+   3
+  ],
+  "empty_after_remove": true
+ },
+ "residue_after": {
+  "query": "select count(*) from storage.objects where name like 'storage-listing-http-20261014/%'",
+  "rows": 0,
+  "checked_by": "Claude through the Supabase MCP connector, read-only"
+ },
+ "database_half": "20261014-storage-listing-results.json"
+}
