@@ -254,11 +254,12 @@ moment it is made, so a large task list never lives only in conversation.
   can give them one; production lacks the typed protocol, so the fix ships
   as a standalone slice
   (docs/provider-mutation-acceptance/20261018-production-name-retention-slice.sql).
-  Open: its rolled-back production experiment (…-experiment.sql; the
-  auto-mode classifier blocks DDL on production for Claude, so Aryan runs it
-  in the SQL editor or allows the tool), then applying the slice (Aryan's
-  go-ahead), CI Postgres gate, generated names and server-owned handles with
-  the sign-up overhaul.
+  Its rolled-back production experiment passed 2026-10-18: every Scratch
+  case answered the same, the real login's view of mesh2 was identical with
+  the slice in place, and nothing persisted
+  (…/20261018-production-name-retention-results.json). Open: applying the
+  slice (Aryan's go-ahead), CI Postgres gate, generated names and
+  server-owned handles with the sign-up overhaul.
 - [ ] **Handles are unique only by a client check** (found 2026-10-17):
   `Directory.handle_taken` reads every `users/` doc (1,000 at the target)
   and two accounts can race to the same @handle, which allows

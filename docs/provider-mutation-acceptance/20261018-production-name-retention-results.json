@@ -1,0 +1,92 @@
+{
+ "check": "rolled-back production experiment of the name-retention slice",
+ "project": "production (eakewaaqbilmtswbbxix)",
+ "date": "2026-10-18",
+ "authority": "Aryan allowed safe experiments on production (2026-10-18) and asked Claude to retry after allowing the tool",
+ "method": "one DO block through the Supabase MCP connector that applies the slice in its own transaction, observes, and always rolls back by its final exception",
+ "sql": "20261018-production-name-retention-experiment.sql",
+ "sql_sha256": "1a665edd808eae5daf464fba872edb3fa3a213f1665f643c077859532e0df71f",
+ "slice": "20261018-production-name-retention-slice.sql",
+ "slice_sha256": "14c1c66bc0c1777f56acaae4b64cd111b0a1734c2949dbb10f58dffe404b7b0c",
+ "observed": {
+  "slice_applied": true,
+  "real_login_view_of_mesh2": {
+   "before": {
+    "member": true,
+    "roster": 1,
+    "docs": 4300,
+    "chat_metas": 90,
+    "logs": 1286,
+    "events": 15,
+    "blobs": 35
+   },
+   "after": {
+    "member": true,
+    "roster": 1,
+    "docs": 4300,
+    "chat_metas": 90,
+    "logs": 1286,
+    "events": 15,
+    "blobs": 35,
+    "poke_topic": true
+   },
+   "unchanged": true
+  },
+  "self_delete_rows": 0,
+  "self_update_rows": 0,
+  "claim_agent_name": "55000 name belongs to an existing account",
+  "claim_held_name": "23505 duplicate key value violates unique constraint \"ab_members_pkey\"",
+  "claim_fresh_name": "accepted",
+  "foreign_account_doc": "55000 name is claimed by another login",
+  "own_and_agent_docs": "accepted",
+  "account_hard_delete_rows": 0,
+  "account_row_kept": 1,
+  "before_revoke": {
+   "member": "bob",
+   "chat_docs": 1,
+   "poke_topic": true
+  },
+  "after_revoke": {
+   "member": "",
+   "root_ok": false,
+   "roster_rows": 0,
+   "chat_docs": 0,
+   "poke_topic": false
+  },
+  "unrevoke": "55000 a revoked name stays revoked",
+  "owner_delete": "55000 a claimed name is never freed; revoke it instead",
+  "alice_topics": {
+   "own": true,
+   "longer_root": false,
+   "shorter_root": false,
+   "wrong_prefix": false,
+   "bare_prefix": false
+  },
+  "realtime_policies": [
+   "ab_poke_receive (SELECT, authenticated)",
+   "ab_poke_send (INSERT, authenticated)"
+  ],
+  "topic_ok": {
+   "alice": true,
+   "bob (revoked)": false,
+   "carol (fresh claim)": true
+  }
+ },
+ "residue_after": {
+  "revoked_at_column": false,
+  "leave_policy_still_present": true,
+  "new_triggers": 0,
+  "new_functions": 0,
+  "realtime_policies": 0,
+  "fixture_rows": 0,
+  "fixture_events": 0,
+  "ab_member_md5_unchanged": "34720855f461b9d39dc9eec6e5ce926e"
+ },
+ "reading": [
+  "the slice applies cleanly on production's own schema, triggers (change ledger, recovery) and policies",
+  "the real login's view of the real root is identical with the slice in place: docs, chats, logs, ledger events and storage objects",
+  "every Scratch case gives the same answer on production",
+  "nothing persisted: production is exactly as before the experiment"
+ ],
+ "next": "apply the slice for real only on Aryan's go-ahead; turn Realtime public access off only after every machine runs v0.24.378+ and today's realtime.messages partition exists"
+}
