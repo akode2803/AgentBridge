@@ -257,9 +257,14 @@ moment it is made, so a large task list never lives only in conversation.
   Its rolled-back production experiment passed 2026-10-18: every Scratch
   case answered the same, the real login's view of mesh2 was identical with
   the slice in place, and nothing persisted
-  (…/20261018-production-name-retention-results.json). Open: applying the
-  slice (Aryan's go-ahead), CI Postgres gate, generated names and
-  server-owned handles with the sign-up overhaul.
+  (…/20261018-production-name-retention-results.json). **Applied to
+  production 2026-10-18** on Aryan's go-ahead (migration
+  `name_retention_private_pokes_20261018`; triggers, poke policies and the
+  revoked filter verified; his login's view unchanged). The four human
+  accounts that use his login (aryan1, aryanonavd, fable, musk27aan) need
+  the operator's `seed` only if one ever gets its own login. Open: CI
+  Postgres gate, generated names and server-owned handles with the sign-up
+  overhaul.
 - [ ] **Handles are unique only by a client check** (found 2026-10-17):
   `Directory.handle_taken` reads every `users/` doc (1,000 at the target)
   and two accounts can race to the same @handle, which allows
@@ -316,8 +321,10 @@ moment it is made, so a large task list never lives only in conversation.
   and, once off, a public join are refused; a public listener never hears
   private pokes). Evidence:
   docs/provider-mutation-acceptance/20261017-private-pokes-http-results.json.
-  Open: production (Aryan's call; check today's `realtime.messages`
-  partition first, see the design note's Rollout).
+  Production: policies applied 2026-10-18 with the name slice; this
+  machine's client (~/Documents/GitHub/AgentBridge) is v0.24.378. Open:
+  turning "Allow public access" off (authorized by Aryan; he is signing in
+  to the dashboard in the browser pane).
 - [ ] **Root-wide work per delta tick** (review 2026-10-14): every tick runs
   `list_chat_ids`, and `ab_chat_ids` scans the root's logs and chat docs,
   so cost grows with total history. Replace it with membership changes on

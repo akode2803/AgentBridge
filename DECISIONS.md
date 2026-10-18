@@ -69,6 +69,13 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
     by the claim, synthetic addresses keyed to the generated name, and a
     Supabase password derived from the app password. Each still gets a
     design note and an independent review before code.
+  - 2026-10-18: name fix applied to production (after Aryan read why the
+    four humans who use his login would need `seed`). P7 as revised
+    (docs/COMMIT_ORDERED_CURSORS.md): build it. Full pull 6 h → 24 h with
+    the drift counter; if a full pull finds something the feeds missed,
+    the zero-drift streak resets (no stretch to a week until it holds
+    again). The change ledger: to be discussed in detail before any
+    change.
 - **Why now:** nothing typed is activated and production holds no typed
   data. After activation, P1, P10 and the wrap layout become migrations on
   every user's machine.

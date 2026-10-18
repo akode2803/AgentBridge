@@ -88,5 +88,34 @@
   "every Scratch case gives the same answer on production",
   "nothing persisted: production is exactly as before the experiment"
  ],
- "next": "apply the slice for real only on Aryan's go-ahead; turn Realtime public access off only after every machine runs v0.24.378+ and today's realtime.messages partition exists"
+ "next": "turn Realtime public access off (authorized); the first private join will create today's realtime.messages partition (MissingPartition once, retried)",
+ "applied": {
+  "date": "2026-10-18",
+  "authority": "Aryan: \"after that we can apply the fix, its important\" (after the seed explanation)",
+  "migration": "name_retention_private_pokes_20261018 (apply_migration, the slice file verbatim, sha256 14c1c66bc0c1777f56acaae4b64cd111b0a1734c2949dbb10f58dffe404b7b0c)",
+  "verified": {
+   "triggers": [
+    "ab_docs_keep_accounts",
+    "ab_docs_one_owner",
+    "ab_members_keep_names",
+    "ab_members_one_owner"
+   ],
+   "realtime_policies": [
+    "ab_poke_receive",
+    "ab_poke_send"
+   ],
+   "leave_policy_present": false,
+   "revoked_at_column": true,
+   "revoked_rows": 0,
+   "real_login_view": {
+    "member": true,
+    "docs": 4300,
+    "chat_metas": 90,
+    "logs": 1286,
+    "blobs": 35,
+    "poke_topic": true
+   }
+  },
+  "still_open": "Realtime \"Allow public access\" (dashboard setting; Aryan authorized turning it off; the client on this machine, ~/Documents/GitHub/AgentBridge, is already v0.24.378 and not running)"
+ }
 }
