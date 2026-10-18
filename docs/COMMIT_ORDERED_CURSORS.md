@@ -1,7 +1,9 @@
 # Commit-ordered cursors, join catch-up and "cursor too old"
 
-Status: design, 2026-10-18, revised after an independent review (two
-blockers and eight should-fixes, all folded in below). Aryan agreed the
+Status: built in v0.24.379 (2026-10-18): schema, CI gate, client, unit
+tests; applied on Scratch. Production waits for Aryan's go-ahead. Design
+revised after an independent review (two blockers and eight should-fixes,
+all folded in below). Aryan agreed the
 direction on 2026-10-17 (DECISIONS.md D-020: P7 plus a scoped catch-up on
 join and a "cursor too old" answer, leaving the full pull as a rare safety
 net). Background: docs/FOUNDATION_REVIEW.md F6; BACKLOG "Delta cursors can
@@ -68,7 +70,12 @@ later is at least every frontier seen before it.
   frontier alone. Pairs exist only in memory between pages. This keeps the
   mirror's `provider_cursor` (an INTEGER in `shadow_slot`) and
   `sync/log_cursor`. A format marker next to each says "frontier", so an
-  old `seq`/`id` value is never misread:
+  old `seq`/`id` value is never misread. As built: the driver hands out
+  `FeedCursor(position, basis)` with basis `"frontier:<epoch>"`; stores
+  keep the integer where it was and the basis beside it (the mirror
+  snapshot's `cursor_basis`, the log cursor doc's `basis`). A plain integer
+  or another basis answers `CursorTooOld`, so the epoch check needs no
+  extra request:
   - mirror: an old cursor means one full pull (below);
   - log feed: an old cursor means scanning each visible chat by its
     `list_logs` heads (as for a join), then starting at the current

@@ -270,13 +270,17 @@ moment it is made, so a large task list never lives only in conversation.
   and two accounts can race to the same @handle, which allows
   impersonation. Claim handles on the server (a unique row) before handles
   become the only visible username.
-- [ ] **A chat joined mid-session misses its older docs** (found 2026-10-17,
+- [~] **A chat joined mid-session misses its older docs** (found 2026-10-17,
   confirmed by a probe against `CachingTransport`): the delta returns only
   rows above the cursor, so a newly visible chat's older edits, deletions,
   pins and reactions wait for the next full pull. Fix with a scoped
   catch-up when a chat appears (logs already do this via `SyncEngine._known`).
   Design (draft 2026-10-18, section C): docs/COMMIT_ORDERED_CURSORS.md.
-- [ ] **Delta cursors can skip late commits** (correctness, pre-existing,
+  Built in v0.24.379 (the mirror's `caught_up` set; one prefix read per
+  newly visible chat, also after this process appended to it). Unit-tested
+  and the hosted client check passed; ticks after production and a live
+  run.
+- [~] **Delta cursors can skip late commits** (correctness, pre-existing,
   review 2026-10-14). `get_docs_delta` reads `seq > cursor` and logs
   `id > cursor`, but both are assigned before commit, so a slower transaction
   lands below a cursor a reader already passed and is missed until the 6 h
@@ -296,7 +300,14 @@ moment it is made, so a large task list never lives only in conversation.
   taken before the id) so local offsets stay safe; a purge floor in its own
   table plus the epoch for "too old"; keyset full pulls; reconcile 6 h →
   24 h with a drift counter. The change ledger stays as is (its lock guards
-  the seal and node fences too). Awaiting Aryan's decision before code.
+  the seal and node fences too). Aryan 2026-10-18: "build revised P7:
+  yes". Built in v0.24.379: schema (commit `150f6c8`; CI gate with real
+  sessions), client (feed cursors with a basis, "too old" handling, keyset
+  pulls, 24 h reconcile with drift). Scratch: applied, index scans
+  confirmed; Aryan's hosted client check passed 2026-10-18 (17/17;
+  docs/provider-mutation-acceptance/20261018-commit-ordered-feeds-http-results.json).
+  Open: production schema (his go-ahead),
+  `idle_in_transaction_session_timeout = 60s` per project.
 - [ ] **Decide whether to retire the change ledger with the node stack**
   (review of P7, 2026-10-18): once docs and logs are commit-ordered, the
   harness could take its scopes from the mirror delta and the log feed and

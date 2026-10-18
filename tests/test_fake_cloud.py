@@ -11,6 +11,7 @@ from fake_cloud import CloudRegistry, FakeClient, refresh_transport
 from agentbridge.core.errors import ValidationError
 from agentbridge.core.models import ChatKind, UserKind
 from agentbridge.store.mutation_coordinator import MutationCoordinator
+from agentbridge.transport.base import CursorTooOld, FeedCursor
 from agentbridge.transport.cache import CachingTransport
 from agentbridge.transport.local_mutations import LocalMutationTransport, root_identity
 from agentbridge.transport.supabase import SupabaseTransport
@@ -232,14 +233,15 @@ def test_bulk_seed_exceeds_one_provider_page_and_preserves_delta_order_and_other
         documents["items/00000.json"]["values"].append(-1)
         writer = registry.bare(root)
         snapshot, cursor = writer.snapshot_docs()
-        assert len(snapshot) == 20_011 and cursor == 20_011
+        assert len(snapshot) == 20_011 and type(cursor) is FeedCursor
+        assert len(cursor.row_positions) == 20_011
         assert snapshot["items/00000.json"] == {"values": [0]}
         registry.seed_documents(root, {"items/00000.json": {"values": [99]},
                                        "items/new.json": {"values": [100]}})
         changed, deleted, advanced = writer.get_docs_delta(cursor)
         assert changed == {"items/00000.json": {"values": [99]},
                            "items/new.json": {"values": [100]}}
-        assert deleted == set() and advanced == cursor + 2
+        assert deleted == set() and advanced.position > cursor.position
         client = registry.client(root)
         client.seed_documents("another-root", {"items/00000.json": {"values": [101]}})
         registry.seed_documents(root, {"items/00000.json": {"values": [102]}})
@@ -262,15 +264,18 @@ def test_replace_log_is_detached_scoped_and_advances_real_driver_high_water(tmp_
         driver = registry.bare(root)
         driver.append_log("chat", "alice@m", {"id": "old", "from": "alice"})
         driver.append_log("other", "bob@m", {"id": "keep", "from": "bob"})
-        _, cursor = driver.changed_logs(0)
+        with pytest.raises(CursorTooOld) as old_cursor:
+            driver.changed_logs(0)       # a counter, not a frontier: restart
+        cursor = old_cursor.value.restart
         records = [{"id": "replacement", "from": "alice", "files": [{"name": "safe"}]}]
         registry.replace_log(root, "chat", "alice@m", records)
         records[0]["files"][0]["name"] = "changed-after-replacement"
         read, offset = driver.read_log("chat", "alice@m")
         assert read[0]["id"] == "replacement" and read[0]["files"] == [{"name": "safe"}]
-        assert offset > cursor
+        assert offset > 2                # above both original rows' ids
         assert driver.read_log("other", "bob@m")[0] == [{"id": "keep", "from": "bob"}]
-        assert driver.changed_logs(cursor) == ([("chat", "alice@m")], offset)
+        pairs, advanced = driver.changed_logs(cursor)
+        assert pairs == [("chat", "alice@m")] and advanced.position > cursor.position
 
 
 def test_effect_capability_is_explicit_and_transitions_use_document_delta_sequence(tmp_path):
@@ -291,7 +296,7 @@ def test_effect_capability_is_explicit_and_transitions_use_document_delta_sequen
         assert changed == {params["p_path"]: params["p_data"],
                            f"{base}/grant-ask.json": params["p_grant_ask"],
                            f"{base}/grant-decision.json": params["p_grant_decision"]}
-        assert deleted == set() and advanced == cursor + 3
+        assert deleted == set() and advanced.position > cursor.position
 
 
 def test_effect_protocol_requires_order_and_matching_atomic_companions():

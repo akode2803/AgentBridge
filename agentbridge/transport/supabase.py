@@ -44,7 +44,9 @@ from pathlib import Path
 from typing import Any
 
 from ..core.errors import TransportError, ValidationError
-from .base import Transport, TransportProfile, Watcher
+from .base import (
+    CursorTooOld, FeedCursor, Transport, TransportProfile, Watcher,
+)
 from .change_ledger import (
     ChangeLedgerCapability,
     ChangeLedgerEpoch,
@@ -122,6 +124,10 @@ _MISSING_COL_MARKS = (
     "42703", "PGRST202", "PGRST204", "does not exist", "Could not find",
 )
 _DELTA_REPROBE_S = 60.0       # legacy mode re-probes (a paste upgrades live)
+_FEED_PAGE = 1000             # rows per feed answer (the RPCs refuse more)
+_DOC_PAGE = 1000              # rows per keyset page of a full or prefix pull
+_DOC_FEED_KEYS = frozenset({"path", "data", "deleted", "seq", "txid"})
+_LOG_FEED_KEYS = frozenset({"id", "chat_id", "log_name", "txid"})
 _LEDGER_REPROBE_S = 60.0
 _LEDGER_SCHEMA_VERSION = 1
 _SOURCE_LEDGER_SCHEMA_VERSION = 2
@@ -137,6 +143,19 @@ _MUTATION_PROTOCOL_REPROBE_S = 60.0
 def _is_missing_column(err: Exception) -> bool:
     s = str(err)
     return any(m in s for m in _MISSING_COL_MARKS)
+
+
+def _feed_basis(epoch: Any) -> str:
+    """The FeedCursor basis of the commit-ordered feeds under ``epoch``."""
+    if epoch is not None and type(epoch) is not str:
+        raise ValueError("invalid feed epoch")
+    return "frontier:" + (epoch or "")
+
+
+def _feed_int(value: Any) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError("invalid feed position")
+    return value
 
 
 def load_supabase_env(home: Path | None = None) -> dict[str, str]:
@@ -210,7 +229,10 @@ class SupabaseTransport(Transport):
     # mirror/sync/presence layers slow their safety polls and lean on hints
     profile = TransportProfile(
         metered=True, supports_doc_delta=True,
-        idle_poll_s=45.0, fallback_poll_s=10.0, reconcile_s=6 * 3600.0,
+        # P7: the doc delta is commit-ordered, a new chat is caught up on
+        # join and a purged or restored history answers "too old", so the
+        # full pull is a once-a-day safety net that counts drift.
+        idle_poll_s=45.0, fallback_poll_s=10.0, reconcile_s=24 * 3600.0,
         # Each durable heartbeat is also an API Gateway log entry.  A 45-second
         # beat reduces the idle baseline while remaining inside older clients'
         # 120-second stale window after their own 45-second safety read.  New
@@ -286,6 +308,9 @@ class SupabaseTransport(Transport):
         # upgrades a live fleet without restarts.
         self._delta: bool | None = None
         self._delta_reprobe = 0.0
+        # P7: are the commit-ordered feed RPCs live? Same probing as _delta.
+        self._feeds: bool | None = None
+        self._feeds_reprobe = 0.0
         self._ret_min: bool | None = None  # library accepts returning="minimal"?
         self._effects_ready: bool | None = None
         self._effects_reprobe = 0.0
@@ -543,6 +568,8 @@ class SupabaseTransport(Transport):
             out = dict(self._stats)
         out["mode"] = ("delta" if self._delta
                        else "legacy" if self._delta is False else "unprobed")
+        out["feeds"] = ("commit-ordered" if self._feeds
+                        else "legacy" if self._feeds is False else "unprobed")
         out["realtime"] = self.realtime_status()
         with self._rt_state_lock:
             retry_at = self._rt_retry_at
@@ -571,6 +598,71 @@ class SupabaseTransport(Transport):
                 # can't tell yet (offline?) — stay unprobed, decide later
                 return False
         return bool(self._delta)
+
+    # ------------------------------------------ commit-ordered feeds (P7)
+    def _feeds_ok(self) -> bool:
+        """Are the commit-ordered feed RPCs live (docs/COMMIT_ORDERED_CURSORS.md)?
+        A missing function re-probes every ``_DELTA_REPROBE_S``, like
+        ``_delta_ok``. Unlike it, a network fault before the first verdict
+        RAISES: guessing "legacy" would hand out a cursor of the wrong kind
+        and cost a needless full pull once the network is back."""
+        if self._feeds is True:
+            return True
+        if self._feeds is False and time.monotonic() < self._feeds_reprobe:
+            return False
+        if not self._delta_ok():
+            return False
+        try:
+            self._feed_start()
+            self._feeds = True
+        except Exception as e:  # noqa: BLE001
+            if not _is_missing_column(e):
+                if self._feeds is None:
+                    raise
+                return False
+            self._feeds = False
+            self._feeds_reprobe = time.monotonic() + _DELTA_REPROBE_S
+        return bool(self._feeds)
+
+    def _feed_start(self) -> FeedCursor:
+        """The current frontier as a cursor. Every transaction below it has
+        finished, so a reader that then reads everything is current at it."""
+        raw = self._retry(lambda: self._sb().rpc(
+            "ab_feeds_frontier", {"p_root": self.root}).execute()).data
+        self._count(raw)
+        try:
+            return FeedCursor(_feed_int(raw["frontier"]),
+                              _feed_basis(raw["epoch"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TransportError(
+                "Supabase returned an invalid feed frontier") from exc
+
+    def _feed_page(self, fn: str, after: tuple[int, int],
+                   keys: frozenset[str]):
+        """One feed answer, checked: ``(rows, has_more, next, frontier,
+        basis, too_old)``."""
+        position = "p_after_seq" if fn == "ab_docs_feed" else "p_after_id"
+        raw = self._retry(lambda: self._sb().rpc(fn, {
+            "p_root": self.root, "p_after_txid": after[0],
+            position: after[1], "p_limit": _FEED_PAGE,
+        }).execute()).data
+        self._count(raw)
+        try:
+            rows, nxt = raw["rows"], raw["next"]
+            if (type(rows) is not list or len(rows) > _FEED_PAGE
+                    or any(type(r) is not dict or not keys <= r.keys()
+                           for r in rows)
+                    or type(raw["has_more"]) is not bool
+                    or type(raw["too_old"]) is not bool
+                    or type(nxt) is not list or len(nxt) != 2):
+                raise ValueError("invalid feed answer")
+            return (rows, raw["has_more"],
+                    (_feed_int(nxt[0]), _feed_int(nxt[1])),
+                    _feed_int(raw["frontier"]), _feed_basis(raw["epoch"]),
+                    raw["too_old"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TransportError(
+                f"Supabase returned an invalid {fn} answer") from exc
 
     # ----------------------------------------------------- durable change log
     @property
@@ -1350,34 +1442,63 @@ class SupabaseTransport(Transport):
         tell 'the store is empty' apart from 'the network is down' (stale
         beats vanished)."""
         prefix = _check(prefix) if prefix else ""
-        out: dict[str, Any] = {}
-        page = 1000
-        start = 0
+        rows = self._keyset_docs(prefix, "path,data", live_only=self._delta_ok())
+        return {str(r["path"]): r["data"] for r in rows}
+
+    def _keyset_docs(self, prefix: str, cols: str, *,
+                     live_only: bool) -> list[dict]:
+        """Every ``ab_docs`` row under ``prefix``, paged by key (``path >
+        last``), not by offset: a row deleted or added between two pages
+        cannot shift a later page and hide another row. Reads until an empty
+        page, so a server row cap below the page size cannot end it early.
+        LIKE treats ``_`` in the prefix as a wildcard, so rows are re-checked
+        with an exact prefix test."""
+        out: list[dict] = []
+        last: str | None = None
         while True:
-            def fetch(lo: int = start):
-                q = self._sb().table("ab_docs").select("path,data") \
+            def fetch(after: str | None = last):
+                q = self._sb().table("ab_docs").select(cols) \
                     .eq("root", self.root)
-                if self._delta_ok():
+                if live_only:
                     q = q.eq("deleted", False)
                 if prefix:
                     q = q.like("path", f"{prefix}%")
-                return q.order("path").range(lo, lo + page - 1).execute()
+                if after is not None:
+                    q = q.gt("path", after)
+                return q.order("path").limit(_DOC_PAGE).execute()
             rows = self._retry(fetch).data
             self._count(rows)
-            for r in rows:
-                out[str(r["path"])] = r["data"]
-            if len(rows) < page:
+            if not rows:
                 return out
-            start += page
+            out.extend(r for r in rows if str(r["path"]).startswith(prefix))
+            last = str(rows[-1]["path"])
 
     # ------------------------------------------------------- delta feed (R76)
     def snapshot_docs(self) -> tuple[dict[str, Any], int]:
         """Full snapshot + the cursor it is current at. The cursor is read
         BEFORE the snapshot: a row updated mid-pull gets a later seq than the
         cursor, so the next delta re-fetches it — never stale, only an
-        idempotent overlap (SCALING.md §2)."""
+        idempotent overlap (SCALING.md §2). With the commit-ordered feeds the
+        cursor is the frontier, and the pull includes tombstones so each
+        path's last write position rides on the cursor (drift counting)."""
         if not self._delta_ok():
             return self.get_docs(""), 0
+        if self._feeds_ok():
+            start = self._feed_start()
+            docs: dict[str, Any] = {}
+            positions: dict[str, int] = {}
+            for r in self._keyset_docs("", "path,data,deleted,txid",
+                                       live_only=False):
+                path = str(r["path"])
+                try:   # xid8 reaches PostgREST JSON as a string
+                    positions[path] = int(r["txid"])
+                except (TypeError, ValueError) as exc:
+                    raise TransportError(
+                        "Supabase returned an invalid doc txid") from exc
+                if not r.get("deleted"):
+                    docs[path] = r["data"]
+            return docs, FeedCursor(start.position, start.basis,
+                                    row_positions=positions)
         def head():
             return self._sb().table("ab_docs").select("seq") \
                 .eq("root", self.root).order("seq", desc=True) \
@@ -1389,11 +1510,17 @@ class SupabaseTransport(Transport):
     def get_docs_delta(self, cursor: int) -> tuple[dict[str, Any], set[str], int]:
         """Docs whose seq moved past ``cursor``: ``(changed, deleted, new
         cursor)``. Seq-keyed pagination (no offset paging over a moving set);
-        rows apply in seq order so the final state of a path wins."""
+        rows apply in seq order so the final state of a path wins. With the
+        commit-ordered feed the cursor is a ``FeedCursor`` at a frontier, and
+        anything else raises ``CursorTooOld``."""
         if not self._delta_ok():
             # the mirror falls back to a full pull on this signal — the
             # legacy schema has no cursor to serve (base contract)
             raise NotImplementedError("doc delta feed unavailable (legacy schema)")
+        if self._feeds_ok():
+            return self._docs_feed(cursor)
+        if isinstance(cursor, FeedCursor):
+            raise CursorTooOld("the commit-ordered doc feed is unavailable")
         changed: dict[str, Any] = {}
         deleted: set[str] = set()
         last = int(cursor)
@@ -1416,6 +1543,35 @@ class SupabaseTransport(Transport):
                     deleted.discard(path)
             if len(rows) < page:
                 return changed, deleted, last
+
+    def _docs_feed(self, cursor: Any) -> tuple[dict[str, Any], set[str], FeedCursor]:
+        if (not isinstance(cursor, FeedCursor)
+                or not cursor.basis.startswith("frontier:")):
+            raise CursorTooOld("doc cursor predates the commit-ordered feed")
+        changed: dict[str, Any] = {}
+        deleted: set[str] = set()
+        after = (cursor.position, 0)
+        while True:
+            rows, more, nxt, frontier, basis, too_old = self._feed_page(
+                "ab_docs_feed", after, _DOC_FEED_KEYS)
+            if too_old or basis != cursor.basis:
+                raise CursorTooOld("doc cursor is older than the server's history")
+            for r in rows:
+                path = r["path"]
+                if type(path) is not str or type(r["deleted"]) is not bool:
+                    raise TransportError("Supabase returned an invalid doc feed row")
+                if r["deleted"]:
+                    deleted.add(path)
+                    changed.pop(path, None)
+                else:
+                    changed[path] = r["data"]
+                    deleted.discard(path)
+            if not more:
+                return changed, deleted, FeedCursor(
+                    max(frontier, cursor.position), basis)
+            if nxt <= after:
+                raise TransportError("Supabase doc feed did not advance")
+            after = nxt
 
     # ----------------------------------------------------------------- writes
     def _write(self, build):
@@ -1633,7 +1789,15 @@ class SupabaseTransport(Transport):
         """The R30 sync fast path: ``ab_logs`` row ids are globally monotonic
         (one identity column for the whole table), so "what changed since?"
         is ONE indexed query no matter how many chats exist. Idle ticks cost
-        one empty-result round-trip instead of a list_logs RPC per chat."""
+        one empty-result round-trip instead of a list_logs RPC per chat.
+        With the commit-ordered feed (P7) the cursor is a ``FeedCursor`` and
+        the feed never passes a row still in flight; any other cursor raises
+        ``CursorTooOld`` with the frontier to restart from."""
+        if self._feeds_ok():
+            return self._logs_feed(cursor)
+        if isinstance(cursor, FeedCursor):
+            raise CursorTooOld("the commit-ordered log feed is unavailable",
+                               restart=0)
         rows = self._retry(
             lambda: self._sb().table("ab_logs").select("id,chat_id,log_name")
             .eq("root", self.root).gt("id", int(cursor)).order("id")
@@ -1651,6 +1815,31 @@ class SupabaseTransport(Transport):
                 seen.add(key)
                 pairs.append(key)
         return pairs, new_cursor
+
+    def _logs_feed(self, cursor: Any) -> tuple[list[tuple[str, str]], FeedCursor]:
+        if (not isinstance(cursor, FeedCursor)
+                or not cursor.basis.startswith("frontier:")):
+            raise CursorTooOld("log cursor predates the commit-ordered feed",
+                               restart=self._feed_start())
+        pairs: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        after = (cursor.position, 0)
+        while True:
+            rows, more, nxt, frontier, basis, too_old = self._feed_page(
+                "ab_logs_feed", after, _LOG_FEED_KEYS)
+            if too_old or basis != cursor.basis:
+                raise CursorTooOld("log cursor is older than the server's history",
+                                   restart=FeedCursor(frontier, basis))
+            for r in rows:
+                key = (str(r["chat_id"]), str(r["log_name"]))
+                if key not in seen:
+                    seen.add(key)
+                    pairs.append(key)
+            if not more:
+                return pairs, FeedCursor(max(frontier, cursor.position), basis)
+            if nxt <= after:
+                raise TransportError("Supabase log feed did not advance")
+            after = nxt
 
     def delete_chat(self, chat_id: str) -> None:
         chat_id = _check(chat_id)

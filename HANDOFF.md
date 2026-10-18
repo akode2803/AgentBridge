@@ -1,5 +1,33 @@
 # Cloud source handoff
 
+## 2026-10-18 commit-ordered feeds (P7) — v0.24.379
+
+Design: docs/COMMIT_ORDERED_CURSORS.md (revised after review; Aryan:
+"build revised P7: yes"). Schema (end of docs/supabase_schema.sql): `txid`
+on `ab_docs`/`ab_logs`, `ab_order_log_id` (ids in one log follow commit
+order), `ab_doc_floors` + the purge-floor trigger, and the RPCs
+`ab_feeds_frontier`, `ab_docs_feed`, `ab_logs_feed` (one jsonb answer,
+`has_more` from limit+1, `too_old` below the floor or above the horizon).
+Client: `FeedCursor`/`CursorTooOld` (`transport/base.py`); the Supabase
+driver probes the RPCs and keeps the old counters without them; the mirror
+keeps the cursor's basis, a `caught_up` set (one prefix read per newly
+visible chat), drift counting on the now 24 h reconcile, and one full pull
+after "too old"; `SyncEngine` stores the log cursor's basis and, on
+`CursorTooOld`, scans member chats by heads and restarts at the frontier.
+Keyset (`path > last`) full and prefix pulls.
+
+Verified: unit tests (tests/test_commit_ordered_feeds.py, the fake cloud
+models in-flight transactions); the CI Postgres gate's four P7 schedules
+with real sessions; on Scratch the section is applied
+(`p7_commit_ordered_feeds_20261018`, 20261018174433) with production's
+member policies (`scratch_member_policies_20261018`, 20261018174458), and
+both feeds plan as index scans on their `(root, txid, …)` index. Aryan's
+hosted client check passed (devtools/validate_commit_ordered_feeds_http.py,
+root `p7-feeds-http-20261018`, 17/17, lags ~0.2 s; evidence
+docs/provider-mutation-acceptance/20261018-commit-ordered-feeds-http-results.json).
+Pending: production's schema (his go-ahead); the rollout step
+`idle_in_transaction_session_timeout = 60s` per project.
+
 ## 2026-10-14 deleted-chat cleanup (D-018)
 
 A typed delete-for-everyone now reclaims the chat's files right after its

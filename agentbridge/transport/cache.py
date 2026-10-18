@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.config import atomic_write_json, read_json
-from .base import Transport, Watcher
+from .base import CursorTooOld, FeedCursor, Transport, Watcher
 from .health import retry_delay, transport_error_message, classify_transport_error
 from .authority_observation import detach_ingress_documents, detach_ingress_value
 from .mirror_observation import (
@@ -77,6 +77,14 @@ from .mirror_observation import (
 )
 
 __all__ = ["CachingTransport"]
+
+
+def _split_cursor(cursor: Any) -> tuple[int, str, Any]:
+    """``(position, basis, row_positions)`` of a driver's cursor: a plain
+    int is the driver's own counter (basis ""), a FeedCursor names its basis."""
+    if isinstance(cursor, FeedCursor):
+        return int(cursor.position), str(cursor.basis), cursor.row_positions
+    return int(cursor), "", None
 
 # base cadence for an UNMETERED wrapped transport (internal tests).
 # Metered drivers get their cadence from their TransportProfile instead.
@@ -205,6 +213,19 @@ class CachingTransport(Transport):
         self._warm = False
         self._last_refresh = 0.0               # wall clock of last good pull
         self._cursor = 0                       # doc delta cursor (R76)
+        # P7: what the cursor counts ("" = the driver's own counter; else a
+        # FeedCursor basis such as "frontier:<epoch>"), and the visible chats
+        # whose docs below the cursor this mirror has read (a full pull, or a
+        # chat's catch-up read). A chat outside it gets its catch-up read on
+        # the next delta tick that reconciles visibility.
+        self._cursor_basis = ""
+        self._caught_up: set[str] = set()
+        # P7 drift counting (docs/COMMIT_ORDERED_CURSORS.md E): rows a
+        # scheduled full pull found that the delta feed should have
+        # delivered. Wall-clock start of the current zero-drift streak.
+        self._drift_last: int | None = None
+        self._drift_total = 0
+        self._drift_zero_since: float | None = None
         self._last_full = 0.0                  # monotonic of last full pull
         self._suspect_until = 0.0              # hint watchdog (monotonic)
         self._interactive_until = 0.0          # foreground GUI lease
@@ -285,11 +306,23 @@ class CachingTransport(Transport):
         try:
             cursor = max(0, int(doc.get("cursor") or 0))
             saved = float(doc.get("saved") or 0)
+            drift_total = max(0, int(doc.get("drift_total") or 0))
+            zero_since = doc.get("drift_zero_since")
+            zero_since = float(zero_since) if zero_since is not None else None
         except (TypeError, ValueError):
             return
+        basis = doc.get("cursor_basis")
+        basis = basis if type(basis) is str else ""
+        caught_up = doc.get("caught_up")
         detached_docs, authority_unsafe = detach_ingress_documents(copy.deepcopy(docs))
         selection_keys_valid = _selection_keys_valid(detached_docs)
         detached_chat_ids = sorted({str(c) for c in chat_ids if c})
+        # a snapshot written before P7 has no caught_up list; its full pulls
+        # read every visible chat, so all its chats count as caught up
+        detached_caught_up = (
+            {str(c) for c in caught_up if c} if isinstance(caught_up, list)
+            else set(detached_chat_ids)
+        ) & set(detached_chat_ids)
         with self._lock:
             with self._captured_mutation_locked():
                 self._docs = detached_docs
@@ -297,6 +330,10 @@ class CachingTransport(Transport):
                 self._mirror_selection_keys_valid = selection_keys_valid
                 self._chat_ids = detached_chat_ids
                 self._cursor = cursor
+                self._cursor_basis = basis
+                self._caught_up = detached_caught_up
+                self._drift_total = drift_total
+                self._drift_zero_since = zero_since
                 self._mirror_provenance = "bootstrap_unverified"
                 self._last_refresh = saved
                 self._last_full = time.monotonic()
@@ -316,8 +353,12 @@ class CachingTransport(Transport):
                         "cache_key": str(getattr(self.inner, "cache_key", "")),
                         "saved": self._last_refresh or time.time(),
                         "cursor": self._cursor,
+                        "cursor_basis": self._cursor_basis,
                         "docs": copy.deepcopy(self._docs),
                         "chat_ids": list(self._chat_ids),
+                        "caught_up": sorted(self._caught_up),
+                        "drift_total": self._drift_total,
+                        "drift_zero_since": self._drift_zero_since,
                     }
                 atomic_write_json(self.snapshot_path, payload)
                 try:
@@ -402,6 +443,8 @@ class CachingTransport(Transport):
             error_message = self._last_error_message
             last_attempt = self._last_attempt
             retry_in = max(0.0, self._next_warm_try - time.monotonic())
+            drift = {"last": self._drift_last, "total": self._drift_total,
+                     "zero_since": self._drift_zero_since}
         stats = getattr(self.inner, "transfer_stats", None)
         return {"warm": warm,
                 "state": health,
@@ -422,6 +465,8 @@ class CachingTransport(Transport):
                 # R84: how this machine authenticates ("member:<name>" vs
                 # "service") — the Connection panel's honest surface
                 "auth": getattr(self.inner, "auth_mode", "") or None,
+                # P7: what scheduled full pulls found the delta feed missed
+                "drift": drift,
                 "transfer": stats() if callable(stats) else None}
 
     def suggest_poll_s(self, default: float) -> float:
@@ -524,24 +569,32 @@ class CachingTransport(Transport):
             self._start_thread()
             return True
 
-    def _refresh_once(self) -> bool:
+    def _refresh_once(self, *, reconcile: bool = False) -> bool:
         with self._refresh_gate:
-            return self._refresh_once_locked()
+            return self._refresh_once_locked(reconcile=reconcile)
 
-    def _refresh_once_locked(self) -> bool:
+    def _refresh_once_locked(self, *, reconcile: bool = False) -> bool:
+        """One full pull. ``reconcile``: the scheduled safety-net pull of a
+        mirror that believes it is current, so differences below its cursor
+        count as drift (a full pull after "too old" expects differences)."""
         t0 = _monotonic()
         # snapshot_docs = full pull + the delta cursor it is current at
         # (base default wraps get_docs with cursor 0 for feed-less drivers)
         with self._lock:
             self._last_attempt = time.time()
         try:
+            # The visible set first: a chat that appears during the pull is
+            # then caught up by the next delta tick, never marked caught up
+            # without its docs.
+            visible = set(self.inner.list_chat_ids())
             docs, cursor = self.inner.snapshot_docs()
+            position, basis, row_positions = _split_cursor(cursor)
             # Provider-owned nested values must not retain aliases into the
             # mirror after the pull returns.  Detachment happens outside the
             # mirror mutex because arbitrary provider values may define hooks.
             docs, authority_unsafe = detach_ingress_documents(copy.deepcopy(dict(docs)))
             selection_keys_valid = _selection_keys_valid(docs)
-            ids = set(self.inner.list_chat_ids())
+            ids = set(visible)
         except Exception as exc:
             self._record_failure(exc)
             raise
@@ -552,6 +605,12 @@ class CachingTransport(Transport):
                 previous_ids = set(self._chat_ids)
                 previous_unsafe = set(self._authority_unsafe)
                 previous_provenance = self._mirror_provenance
+                if (reconcile and was_warm and basis
+                        and basis == self._cursor_basis
+                        and isinstance(row_positions, dict)
+                        and previous_provenance == "provider_observed"):
+                    self._note_drift_locked(self._count_drift_locked(
+                        previous_docs, docs, row_positions, visible))
                 # local writes newer than the snapshot query win until the next
                 # cycle (present = keep ours; absent = we deleted it, keep it gone)
                 for path, wrote in self._doc_writes.items():
@@ -576,7 +635,9 @@ class CachingTransport(Transport):
                 self._chat_ids = sorted(ids)
                 self._neg.clear()  # a fresh snapshot re-answers every miss
                 self._warm = True
-                self._cursor = cursor
+                self._cursor = position
+                self._cursor_basis = basis
+                self._caught_up = visible
                 self._mirror_provenance = "provider_observed"
                 self._last_refresh = time.time()
                 self._last_full = time.monotonic()
@@ -605,6 +666,37 @@ class CachingTransport(Transport):
             self._notify_changes()
         return foreign
 
+    def _count_drift_locked(self, previous: dict, pulled: dict,
+                            positions: dict, visible: set[str]) -> int:
+        """Paths a scheduled full pull found different from the mirror
+        although the delta feed should already have delivered them: the
+        path's last write sits below the mirror's cursor, or the server no
+        longer holds the path at all. This process's recent writes and chats
+        not caught up (their older docs were never read) are left out."""
+        drift = 0
+        for path in set(previous) | set(pulled):
+            if path in self._doc_writes:
+                continue
+            if path.startswith("chats/"):
+                chat_id = path.split("/")[1]
+                if chat_id not in self._caught_up or chat_id not in visible:
+                    continue
+            if previous.get(path, _MISS) == pulled.get(path, _MISS):
+                continue
+            position = positions.get(path)
+            if position is None or position < self._cursor:
+                drift += 1
+        return drift
+
+    def _note_drift_locked(self, drift: int) -> None:
+        """Record one scheduled pull's drift. Any drift restarts the
+        zero-drift streak (Aryan, 2026-10-18: the full pull's interval is
+        stretched only after a long streak of zero)."""
+        self._drift_last = drift
+        self._drift_total += drift
+        if drift or self._drift_zero_since is None:
+            self._drift_zero_since = time.time()
+
     def _prune_guards_locked(self) -> None:
         floor = time.monotonic() - _WRITE_GUARD_S
         self._doc_writes = {p: w for p, w in self._doc_writes.items()
@@ -621,8 +713,9 @@ class CachingTransport(Transport):
         never receives its own broadcast (self:False), so an active user's
         typing/read-state echoes look "unannounced" to their own mirror
         and pinned the live GUI suspect while Aryan typed (v0.24.155).
-        Raises NotImplementedError when the driver has no live feed (the
-        caller falls back to a full pull) and network errors for backoff."""
+        Raises NotImplementedError when the driver has no live feed and
+        CursorTooOld when it cannot serve this cursor (the caller falls back
+        to a full pull either way), and network errors for backoff."""
         with self._refresh_gate:
             return self._refresh_delta_locked(
                 reconcile_visibility=reconcile_visibility,
@@ -632,8 +725,12 @@ class CachingTransport(Transport):
         t0 = time.monotonic()
         with self._lock:
             self._last_attempt = time.time()
+            stored = (FeedCursor(self._cursor, self._cursor_basis)
+                      if self._cursor_basis else self._cursor)
+            caught_up = set(self._caught_up)
         try:
-            changed, deleted, cursor = self.inner.get_docs_delta(self._cursor)
+            changed, deleted, cursor = self.inner.get_docs_delta(stored)
+            position, _basis, _ = _split_cursor(cursor)
             changed, authority_unsafe = detach_ingress_documents(copy.deepcopy(dict(changed)))
             deleted = set(deleted)
             selection_keys_valid = (
@@ -649,7 +746,26 @@ class CachingTransport(Transport):
                 set(self.inner.list_chat_ids())
                 if reconcile_visibility else None
             )
-        except NotImplementedError:
+            # P7 catch-up (docs/COMMIT_ORDERED_CURSORS.md C): a chat that
+            # became visible may hold docs below the cursor, which the delta
+            # never serves. Read each such chat once by prefix. The delta
+            # above already fixed its frontier, so every row below it had
+            # committed before these reads began; newer rows come again in
+            # the next delta (idempotent).
+            caught: dict[str, dict[str, Any]] = {}
+            caught_unsafe: set[str] = set()
+            for chat_id in sorted((visible_ids or set()) - caught_up):
+                caught[chat_id] = self.inner.get_docs(f"chats/{chat_id}/")
+            if caught:
+                merged, caught_unsafe = detach_ingress_documents(copy.deepcopy(
+                    {p: v for docs in caught.values() for p, v in docs.items()}))
+                selection_keys_valid = (
+                    selection_keys_valid and _selection_keys_valid(merged))
+                caught = {
+                    chat_id: {p: merged[p] for p in docs if p in merged}
+                    for chat_id, docs in caught.items()
+                }
+        except (NotImplementedError, CursorTooOld):
             raise
         except Exception as exc:
             self._record_failure(exc)
@@ -714,11 +830,45 @@ class CachingTransport(Transport):
                         path: value for path, value in self._docs.items()
                         if not path.startswith(revoked_prefixes)
                     }
+                for chat_id, chat_docs in caught.items():
+                    # the prefix read is newer than this tick's delta: it
+                    # replaces what the mirror held for the chat
+                    prefix = f"chats/{chat_id}/"
+                    for path in [p for p in self._docs
+                                 if p.startswith(prefix) and p not in chat_docs]:
+                        wrote = self._doc_writes.get(path)
+                        if wrote is not None and wrote >= t0:
+                            continue
+                        if not (silent and path.startswith(silent)):
+                            foreign = True
+                        self._docs.pop(path, None)
+                        self._authority_unsafe.discard(path)
+                        if mutation is not None:
+                            mutation.add(path)
+                    for path, val in chat_docs.items():
+                        wrote = self._doc_writes.get(path)
+                        if wrote is not None and wrote >= t0:
+                            continue
+                        value_changed = self._docs.get(path, _MISS) != val
+                        safety_changed = ((path in self._authority_unsafe)
+                                          != (path in caught_unsafe))
+                        if (value_changed
+                                and not (silent and path.startswith(silent))):
+                            foreign = True
+                        self._docs[path] = val
+                        if path in caught_unsafe:
+                            self._authority_unsafe.add(path)
+                        else:
+                            self._authority_unsafe.discard(path)
+                        if mutation is not None and (value_changed or safety_changed):
+                            mutation.add(path)
                 self._authority_unsafe.intersection_update(self._docs)
                 self._chat_ids = sorted(observed_ids | recent_ids)
-                if changed or deleted:
+                self._caught_up = (
+                    (self._caught_up | set(caught)) & set(self._chat_ids))
+                if changed or deleted or caught:
                     self._neg.clear()      # the world moved: re-answer misses
-                self._cursor = max(self._cursor, cursor)
+                self._cursor = max(self._cursor, position)
                 self._mirror_provenance = "provider_observed"
                 self._last_refresh = time.time()
                 if mutation is not None:
@@ -729,7 +879,7 @@ class CachingTransport(Transport):
                         mutation.complete()
                 self._prune_guards_locked()
         self._record_success()
-        if changed or deleted or revoked_ids:
+        if changed or deleted or revoked_ids or caught:
             self._persist_snapshot()
         if foreign:
             self._notify_changes()
@@ -752,7 +902,7 @@ class CachingTransport(Transport):
                 return self._refresh_delta(
                     reconcile_visibility=bool(visibility),
                 )
-            except NotImplementedError:
+            except (NotImplementedError, CursorTooOld):
                 pass
         return self._refresh_once()
 
@@ -829,13 +979,15 @@ class CachingTransport(Transport):
                 return self._refresh_delta()
             except NotImplementedError:
                 pass                   # legacy schema right now: full pull
+            except CursorTooOld:
+                pass                   # purged, restored or old format: full pull
         # full-pull path: on a metered transport a poke burst must not turn
         # into a full snapshot per poke (legacy-schema mode) — floor the
         # cadence at the fallback rate; reconciles ride the same floor
         if (prof.metered and self._warm and
                 time.monotonic() - self._last_full < prof.fallback_poll_s):
             return False
-        return self._refresh_once()
+        return self._refresh_once(reconcile=reconcile_due and self._warm)
 
     # ------------------------------------------------------------------ docs
     @staticmethod
@@ -1195,6 +1347,7 @@ class CachingTransport(Transport):
                     if mutation is not None:
                         mutation.add(p)
                 self._chat_ids = [c for c in self._chat_ids if c != chat_id]
+                self._caught_up.discard(chat_id)
                 self._chat_writes.pop(chat_id, None)
                 if mutation is not None:
                     mutation.complete()

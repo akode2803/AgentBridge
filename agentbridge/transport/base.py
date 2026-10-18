@@ -34,7 +34,7 @@ local, and both degrade gracefully when absent:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -65,7 +65,42 @@ from .mirror_observation import (
     validated_change_request,
 )
 
-__all__ = ["Transport", "TransportProfile", "Watcher"]
+__all__ = [
+    "CursorTooOld", "FeedCursor", "Transport", "TransportProfile", "Watcher",
+]
+
+
+@dataclass(frozen=True)
+class FeedCursor:
+    """A feed position and the counter it is measured in (P7,
+    docs/COMMIT_ORDERED_CURSORS.md). Plain ``int`` cursors keep meaning a
+    driver's own counter (seq, row id); a driver whose feeds are
+    commit-ordered hands out these instead, with ``basis`` naming the counter
+    and the server's epoch (Supabase: ``"frontier:<epoch>"``). Stores keep
+    the integer in their existing columns and the basis beside it; a driver
+    given a cursor of another basis raises ``CursorTooOld`` rather than
+    misread it.
+
+    ``row_positions`` is set only on the cursor ``snapshot_docs`` returns:
+    each path the full pull read, tombstones included, mapped to the
+    position of its last write. A caller holding an earlier cursor can then
+    tell a change its feed missed (below that cursor) from one that is just
+    newer."""
+
+    position: int
+    basis: str
+    row_positions: Any = field(default=None, compare=False, repr=False)
+
+
+class CursorTooOld(Exception):
+    """The feed can no longer serve this cursor: it predates the feed's
+    format, history below it was purged, or the server's epoch changed (a
+    restore). The caller re-reads everything the cursor covered and goes on
+    from ``restart`` (None: from its next full pull)."""
+
+    def __init__(self, message: str, *, restart: Any = None) -> None:
+        super().__init__(message)
+        self.restart = restart
 
 
 @dataclass(frozen=True)
@@ -337,15 +372,18 @@ class Transport(ABC):
     # these; the mirror cache then refreshes by delta instead of re-pulling
     # the full snapshot (docs/SCALING.md).
     def snapshot_docs(self) -> tuple[dict[str, Any], int]:
-        """Every live doc plus the delta cursor the snapshot is current AT.
-        May RAISE on failure (same contract as ``get_docs``)."""
+        """Every live doc plus the delta cursor the snapshot is current AT
+        (an ``int``, or a ``FeedCursor``). May RAISE on failure (same
+        contract as ``get_docs``)."""
         return self.get_docs(""), 0
 
     def get_docs_delta(self, cursor: int) -> tuple[dict[str, Any], set[str], int]:
         """``(changed, deleted_paths, new_cursor)`` for docs newer than the
         opaque ``cursor``. ``changed`` maps path -> new value; ``deleted``
         names docs removed since. May RAISE on failure — the caller retries
-        with the same cursor (idempotent by construction)."""
+        with the same cursor (idempotent by construction) — and
+        ``CursorTooOld`` when the cursor cannot be served: the caller then
+        pulls a full snapshot."""
         raise NotImplementedError(f"{type(self).__name__} has no doc delta feed")
 
     # ----------------------------------------------------------- chats / logs
@@ -361,7 +399,9 @@ class Transport(ABC):
         """``(chat_id, log_name)`` pairs holding records newer than the opaque
         ``cursor``, plus the new cursor (pass 0 for "everything"). Only called
         when ``has_change_feed`` is True. May RAISE on failure — the caller
-        retries with the same cursor next tick."""
+        retries with the same cursor next tick — and ``CursorTooOld`` when the
+        cursor cannot be served: the caller then scans every chat it reads
+        and goes on from the exception's ``restart`` cursor."""
         raise NotImplementedError(f"{type(self).__name__} has no change feed")
 
     @abstractmethod

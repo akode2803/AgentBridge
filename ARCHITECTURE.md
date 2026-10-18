@@ -154,7 +154,7 @@ cache.
 | `PrivacyService` | the R6 matrix (who may see/reach whom), blocks, agent outbound rules; `visible_profile` is the projection every connector serves instead of raw account docs. On top of it the GUI's `user_json` keeps an agent's harness config (`settings` — model, routing, standing approvals, aux flags) owner-only (R49); `owners` stays public — the responsible member is accountability, not config |
 | `PresenceService` / `ReceiptsService` | online/last-seen heartbeat + the Sent/Delivered/Read ladder from per-member cursors: Read = `read_ns`, Delivered = the R33 `delivered_ns` fetch cursor (presence as the floor); `message_info` carries per-member Delivered/Read timestamps |
 | `Notifier` / `EventBus` | in-process pub/sub feeding the GUI SSE + the CLI long-poll; `consider()` is the one ping decision (membership, not-from-me, mute, read-state — mute + `read_ns` from ONE verified state read, R42) reused by the SSE `notify` lane and the CLI `watch` sinks |
-| `SyncEngine` | pulls new records per chat by byte-offset, in parallel, **never reading logs of chats this identity isn't in**; drops any record whose `from` ≠ the log's owner (ingestion sanity). On a change-feed transport (R30) a tick is ONE "what changed since cursor?" query (cursor persisted in the store; a newly-joined chat gets one full scan since its history may sit below the cursor). In the run loop, each post-watcher scan reports whether message logs changed with or without a hint to the transport wrapper, so metered transports can shorten degraded-realtime polls when log pokes are being lost. A failing pass never kills the loop (next tick heals). |
+| `SyncEngine` | pulls new records per chat by byte-offset, in parallel, **never reading logs of chats this identity isn't in**; drops any record whose `from` ≠ the log's owner (ingestion sanity). On a change-feed transport (R30) a tick is ONE "what changed since cursor?" query (cursor persisted in the store; a newly-joined chat gets one full scan since its history may sit below the cursor; P7: the cursor is stored with its `basis`, and `CursorTooOld` — a pre-P7 counter, or a restored server — means scanning every member chat by its heads, then going on from the exception's `restart` frontier). In the run loop, each post-watcher scan reports whether message logs changed with or without a hint to the transport wrapper, so metered transports can shorten degraded-realtime polls when log pokes are being lost. A failing pass never kills the loop (next tick heals). |
 
 `harden_startup()` (R25, called by connectors on sign-in) is an idempotent
 migration: it refolds pre-R25 chats to populate `tenure` and re-signs any
@@ -289,7 +289,19 @@ TOFU-migrates only identities whose required private keys are local.
   30 days; `put_doc` revives). The driver PROBES for the migrated schema
   and falls back to legacy full snapshots until the `docs/supabase_schema.sql`
   R76 section is pasted — re-probing on a 60s leash, so the paste upgrades a
-  live fleet with no restart. Writes are echo-free (`returning="minimal"`);
+  live fleet with no restart. **P7 commit-ordered feeds**
+  (docs/COMMIT_ORDERED_CURSORS.md): with `ab_feeds_frontier`/`ab_docs_feed`/
+  `ab_logs_feed` live (probed the same way), the doc delta and
+  `changed_logs` serve only rows below the frontier (the oldest transaction
+  still running), so a cursor never passes a late commit; their cursors are
+  `FeedCursor(position, basis="frontier:<epoch>")` (`transport/base.py`),
+  and a plain-int cursor, a purge floor above it, a rewound server or a new
+  epoch raises `CursorTooOld` (with a `restart` cursor for the log feed).
+  Ids within one log follow commit order (the `ab_order_log_id` trigger), so
+  `read_log` offsets stay plain ints. Full and prefix pulls page by key
+  (`path > last`) until an empty page; the full pull includes tombstones so
+  each path's write position rides on the cursor (`row_positions`) for drift
+  counting. Writes are echo-free (`returning="minimal"`);
   outbound **hints are class-coalesced with a trailing edge**
   (`_HintCoalescer`): messages 0.5s, permission asks 1s, run-feed 5s,
   read-state 10s, `presence/` NEVER (heartbeats are carried by safety
@@ -304,7 +316,15 @@ TOFU-migrates only identities whose required private keys are local.
   poke→delta-pull→reconcile shape: realtime pokes wake an
   incremental `get_docs_delta(cursor)` pull; a **slow safety poll**
   (profile `idle_poll_s`, 45s on supabase) guards lost pokes; a full
-  reconcile runs at boot + every `reconcile_s` (6h); a **hint watchdog**
+  reconcile runs at boot + every `reconcile_s` (24h since P7; it counts
+  **drift**: paths that differ although their last write sits below the
+  mirror's cursor, shown in `mirror_status()["drift"]`; any drift restarts
+  the zero-drift streak). P7 also keeps a **`caught_up`** set: a visible
+  chat outside it (joined, or listed by this process's own append) gets one
+  keyset read of `chats/<id>/` in the next delta tick, so its docs below
+  the cursor arrive at once; `CursorTooOld` means one full pull. The cursor's
+  basis, `caught_up` and the drift totals persist in the bootstrap
+  snapshot; a snapshot without a basis costs one full pull. A **hint watchdog**
   drops to `fallback_poll_s` (10s) for 10 min when a safety poll finds
   doc changes no poke announced, and the same suspect window now also listens
   to unhinted message-log discoveries from `SyncEngine`. Pre-migration

@@ -31,12 +31,32 @@ from typing import Callable, Iterable
 from ..store.db import Store
 from ..core.latency import clock_id, sink_for_store
 from ..core import delivery_trace
-from ..transport.base import Transport
+from ..transport.base import CursorTooOld, FeedCursor, Transport
 
 __all__ = ["SyncEngine", "SyncQuiescence", "SyncRetirement"]
 
 # where the change-feed cursor persists (the store's local doc cache)
 CURSOR_DOC = "sync/log_cursor"
+
+
+def _stored_cursor(doc) -> int | FeedCursor:
+    """The feed cursor kept in CURSOR_DOC. With a ``basis`` (P7) it is a
+    FeedCursor; without one it is the driver's plain counter (0 if absent),
+    which a commit-ordered feed answers with CursorTooOld."""
+    if not isinstance(doc, dict) or "cursor" not in doc:
+        return 0
+    try:
+        position = int(doc["cursor"])
+    except (TypeError, ValueError):
+        return 0
+    basis = doc.get("basis")
+    return FeedCursor(position, basis) if type(basis) is str and basis else position
+
+
+def _cursor_doc(cursor) -> dict:
+    if isinstance(cursor, FeedCursor):
+        return {"cursor": cursor.position, "basis": cursor.basis}
+    return {"cursor": int(cursor)}
 
 
 @dataclass(frozen=True)
@@ -362,11 +382,19 @@ class SyncEngine:
                 new += self._scan(joined, lane=lane)
             self._known = set(ids)
             member = self._known
-            doc = self.store.cached_doc(CURSOR_DOC, default=None)
-            cursor = int(doc["cursor"]) if isinstance(doc, dict) and "cursor" in doc \
-                else 0
+            cursor = _stored_cursor(self.store.cached_doc(CURSOR_DOC, default=None))
             try:
                 pairs, new_cursor = self.tx.changed_logs(cursor)
+            except CursorTooOld as exc:
+                # P7: the cursor predates the commit-ordered feed, or the
+                # server's history moved (a restore). The transport read the
+                # restart frontier first; scanning every member chat by its
+                # heads now sees every row below it, and the feed goes on
+                # from there. A failed scan keeps the old cursor (retried).
+                new += self._scan(sorted(member), lane=lane)
+                restart = exc.restart if exc.restart is not None else 0
+                self.store.cache_doc(CURSOR_DOC, _cursor_doc(restart))
+                return new
             except Exception:  # noqa: BLE001 — network blip: same cursor next tick
                 return new
             # NOTE: chats in `joined` stay in todo even though they were just
@@ -384,7 +412,7 @@ class SyncEngine:
             if ok and new_cursor != cursor:
                 # only advance once every named log was read (idempotent by
                 # offsets — re-reading a log we already caught costs nothing)
-                self.store.cache_doc(CURSOR_DOC, {"cursor": new_cursor})
+                self.store.cache_doc(CURSOR_DOC, _cursor_doc(new_cursor))
             return new
 
     # ------------------------------------------------------------- run loop

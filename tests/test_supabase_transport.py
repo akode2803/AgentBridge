@@ -104,7 +104,8 @@ def test_effect_protocol_requires_member_auth_and_exact_rpc(tx):
     changed, deleted, advanced = tx.get_docs_delta(cursor)
     assert changed == {path: doc, f"{base}/grant-ask.json": ask,
                        f"{base}/grant-decision.json": decision}
-    assert deleted == set() and advanced == cursor + 3
+    assert deleted == set() and advanced.position > cursor.position
+    assert tx.get_docs_delta(advanced) == ({}, set(), advanced)
 
 
 def test_get_docs_bulk_read(tx):
@@ -156,6 +157,8 @@ def test_log_append_read_incremental(tx):
 
 
 def test_changed_logs_is_a_global_cursor_feed(tx):
+    """The pre-P7 feed (a schema without ab_logs_feed): row-id cursors."""
+    tx._client.db["_feeds"] = False
     assert tx.has_change_feed is True
     assert tx.changed_logs(0) == ([], 0)          # empty root: empty feed
     tx.append_log("c1", "ann@box.jsonl", {"id": "m1"})
@@ -171,6 +174,7 @@ def test_changed_logs_is_a_global_cursor_feed(tx):
 
 
 def test_changed_logs_is_explicitly_keyset_bounded(tx):
+    tx._client.db["_feeds"] = False      # the pre-P7 feed pages per tick
     for index in range(1_001):
         tx.append_log(f"c{index}", "ann@box.jsonl", {"id": f"m{index}"})
     first_pairs, first_cursor = tx.changed_logs(0)
@@ -911,17 +915,18 @@ def _fresh(legacy=False):
 def test_delta_feed_update_delete_revive(tx):
     tx.put_doc("users/a.json", {"v": 1})
     docs, cursor = tx.snapshot_docs()
-    assert docs == {"users/a.json": {"v": 1}} and cursor > 0
+    assert docs == {"users/a.json": {"v": 1}} and cursor.position > 0
 
     tx.put_doc("users/a.json", {"v": 2})          # update
     tx.put_doc("users/b.json", {"v": 1})          # create
     changed, deleted, c2 = tx.get_docs_delta(cursor)
     assert changed == {"users/a.json": {"v": 2}, "users/b.json": {"v": 1}}
-    assert deleted == set() and c2 > cursor
+    assert deleted == set() and c2.position > cursor.position
 
     tx.delete_doc("users/b.json")                 # soft delete
     changed, deleted, c3 = tx.get_docs_delta(c2)
-    assert changed == {} and deleted == {"users/b.json"} and c3 > c2
+    assert changed == {} and deleted == {"users/b.json"}
+    assert c3.position > c2.position
     assert tx.get_doc("users/b.json") is None     # tombstone reads missing
     assert tx.list_docs("users/") == ["users/a.json"]
 
@@ -1009,7 +1014,7 @@ def test_legacy_schema_falls_back_and_upgrades_live():
     t._delta_reprobe = 0.0                        # the 60s leash elapses
     t.put_doc("users/b.json", {"v": 2})
     _, cursor = t.snapshot_docs()
-    assert cursor > 0                             # delta mode is live
+    assert cursor.position > 0                    # delta mode is live
     t.put_doc("users/b.json", {"v": 3})
     changed, _, _ = t.get_docs_delta(cursor)
     assert changed == {"users/b.json": {"v": 3}}
