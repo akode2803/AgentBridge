@@ -353,8 +353,9 @@ by server stream position. Signal has no server history.
 - **How it heals (2026-10-17).** The 6 hours is `reconcile_s` in the
   Supabase profile, timed per process from its last full pull (start-up
   counts), so there are no shared clocks. The full pull covers docs only. A
-  skipped message heals on a restart, or when the same sender posts again
-  from the same machine in that chat (per-log offsets).
+  log the root-wide feed failed to name heals on a restart, or when its
+  sender posts again. A row skipped inside one log never heals: its offset
+  has passed it (corrected 2026-10-18; docs/COMMIT_ORDERED_CURSORS.md).
 - **Join gap (2026-10-17, confirmed by a probe against the mirror).** A
   chat that becomes visible mid-session gets only its docs written after
   the join. Older docs in it (edits, deletions, pins, reactions) have `seq`

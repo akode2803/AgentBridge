@@ -269,6 +269,7 @@ moment it is made, so a large task list never lives only in conversation.
   rows above the cursor, so a newly visible chat's older edits, deletions,
   pins and reactions wait for the next full pull. Fix with a scoped
   catch-up when a chat appears (logs already do this via `SyncEngine._known`).
+  Design (draft 2026-10-18, section C): docs/COMMIT_ORDERED_CURSORS.md.
 - [ ] **Delta cursors can skip late commits** (correctness, pre-existing,
   review 2026-10-14). `get_docs_delta` reads `seq > cursor` and logs
   `id > cursor`, but both are assigned before commit, so a slower transaction
@@ -276,11 +277,34 @@ moment it is made, so a large task list never lives only in conversation.
   reconcile. Fix (P7): commit-ordered frontier via the row's transaction id
   and `pg_snapshot_xmin`; it also replaces the change ledger's root-wide
   exclusive page lock. Precision (2026-10-17): the 6 h full pull is a
-  per-process timer and covers docs only; a skipped message heals on a
-  restart or when the same sender posts again from the same machine in that
-  chat. Aryan asked whether the full pull is needed at all: with P7, a
+  per-process timer and covers docs only; a log the root-wide feed failed
+  to name heals on a restart or when its sender posts again. Corrected by
+  the review (2026-10-18): a row skipped inside one log never heals
+  (`sync_chat` skips a log whose head equals the offset; `read_log` reads
+  only `id > offset`). Aryan asked whether the full pull is needed at all: with P7, a
   scoped catch-up on join and a "cursor too old" answer it becomes a rare
-  safety net (FOUNDATION_REVIEW F6).
+  safety net (FOUNDATION_REVIEW F6). Design (2026-10-18, revised after an
+  independent review): docs/COMMIT_ORDERED_CURSORS.md: a transaction-id
+  frontier for the doc delta and the root-wide log feed, stored as one
+  integer; ids in one log follow commit order (the existing log-head lock,
+  taken before the id) so local offsets stay safe; a purge floor in its own
+  table plus the epoch for "too old"; keyset full pulls; reconcile 6 h →
+  24 h with a drift counter. The change ledger stays as is (its lock guards
+  the seal and node fences too). Awaiting Aryan's decision before code.
+- [ ] **Decide whether to retire the change ledger with the node stack**
+  (review of P7, 2026-10-18): once docs and logs are commit-ordered, the
+  harness could take its scopes from the mirror delta and the log feed and
+  its wake from the private poke channel. The ledger costs a row, index
+  entry and WAL on every write, kept forever, plus Postgres Changes
+  authorization per event per subscriber (F2). Its root lock also serves
+  the seal, epoch pins and node fences, so retiring it means replacing
+  those. Discuss with Aryan after P7.
+- [ ] **Harness history index skips late or skewed messages** (review of
+  P7, 2026-10-18): `harness/retrieval.py` `ensure_indexed` keeps a
+  high-water mark on the sender's clock (`ns`), so a message that arrives
+  later with a smaller `ns` is never embedded. Not a commit-order issue;
+  fix with P7's second half (server order per chat) or by tracking indexed
+  message ids.
 - [~] **The `ab-<root>` poke channel is public** (review 2026-10-14): anyone
   with the publishable key can send pokes that make every process pull. Make
   it private now (Realtime authorization; "Allow public access" off), ahead
