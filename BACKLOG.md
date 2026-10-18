@@ -304,7 +304,8 @@ moment it is made, so a large task list never lives only in conversation.
   entry and WAL on every write, kept forever, plus Postgres Changes
   authorization per event per subscriber (F2). Its root lock also serves
   the seal, epoch pins and node fences, so retiring it means replacing
-  those. Discuss with Aryan after P7.
+  those. Discussion written 2026-10-18: docs/CHANGE_LEDGER_DISCUSSION.md
+  (keep / repair / retire; tied to the node and the agent-harness direction).
 - [ ] **Harness history index skips late or skewed messages** (review of
   P7, 2026-10-18): `harness/retrieval.py` `ensure_indexed` keeps a
   high-water mark on the sender's clock (`ns`), so a message that arrives
