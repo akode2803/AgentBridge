@@ -3323,6 +3323,159 @@ def _validate_name_retention(database_url: str) -> None:
         raise GateFailure('a bulk purge removed an account row or kept another')
 
 
+def _validate_commit_ordered_feeds(database_url: str) -> None:
+    """P7 (docs/COMMIT_ORDERED_CURSORS.md) with real concurrent sessions.
+
+    seq and id are handed out before commit. These schedules commit rows out
+    of that order and check that the feeds never pass a row still in flight,
+    that a second append to one log waits for the first and then draws a
+    larger id, and that a hard delete answers "too old" below its floor.
+    Runs as the owner: the gate installs no table grants or policies.
+    """
+    suffix = uuid4().hex[:10]
+    root = 'feeds-' + suffix
+    # The legacy gate creates the root's row on its first write; creating it
+    # here keeps a held writer from making every other writer wait on it.
+    _run(database_url, 'insert into public.ab_mutation_roots(root) values ('
+         + _quote(root) + ') on conflict (root) do nothing;')
+
+    def feed(kind: str, after: tuple[int, int], limit: int = 100) -> dict:
+        return json.loads(_scalar(
+            database_url,
+            f'select public.ab_{kind}_feed({_quote(root)}, {int(after[0])}, '
+            f'{int(after[1])}, {int(limit)})::text;'))
+
+    def drain(kind: str, after: tuple[int, int]) -> tuple[list[dict], tuple[int, int]]:
+        rows: list[dict] = []
+        while True:
+            answer = feed(kind, after, limit=2)
+            if answer['too_old']:
+                raise GateFailure(f'{kind} feed answered too_old unexpectedly')
+            rows.extend(answer['rows'])
+            after = (int(answer['next'][0]), int(answer['next'][1]))
+            if not answer['has_more']:
+                return rows, after
+
+    def doc(path: str) -> str:
+        return ('insert into public.ab_docs(root, path, data) values ('
+                f'{_quote(root)}, {_quote(path)}, \'{{}}\'::jsonb)')
+
+    def log(chat: str, name: str, line: str) -> str:
+        return ('insert into public.ab_logs(root, chat_id, log_name, line) values ('
+                f'{_quote(root)}, {_quote(chat)}, {_quote(name)}, {_quote(line)})')
+
+    def session(name: str) -> _PsqlSession:
+        opened = _PsqlSession(database_url)
+        opened.send(f'set application_name={_quote(name)};')
+        return opened
+
+    def wait_blocked(holder: str, waiter: str) -> None:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            blocked = _scalar(database_url,
+                'select exists(select 1 from pg_catalog.pg_stat_activity h '
+                'join pg_catalog.pg_stat_activity w on '
+                'h.pid = any(pg_catalog.pg_blocking_pids(w.pid)) '
+                f'where h.application_name={_quote(holder)} '
+                f'and w.application_name={_quote(waiter)});')
+            if blocked == 't':
+                return
+            time.sleep(0.025)
+        raise GateFailure(f'{waiter} never waited on {holder}')
+
+    # 1. A takes the smaller seq and stays open; B commits a larger one.
+    a = session('feed-a-' + suffix)
+    try:
+        a.send('begin; ' + doc('a') + "; select 'feed-a-ready';")
+        a.wait_marker('feed-a-ready')
+        _run(database_url, doc('b') + ';')
+        first, cursor = drain('docs', (0, 0))
+        if any(row['path'] in {'a', 'b'} for row in first):
+            raise GateFailure('the doc feed served a row at or above a running transaction')
+        a.send("commit; select 'feed-a-done';")
+        a.wait_marker('feed-a-done')
+        a.finish()
+    finally:
+        a.abort()
+    second, cursor = drain('docs', cursor)
+    if sorted(row['path'] for row in second) != ['a', 'b']:
+        raise GateFailure('the doc feed skipped a late commit')
+
+    # 2. B gets its transaction id first, A takes a smaller seq, B commits.
+    a, b = session('feed-a2-' + suffix), session('feed-b2-' + suffix)
+    try:
+        b.send('begin; ' + doc('x') + "; select 'feed-b2-xid';")
+        b.wait_marker('feed-b2-xid')
+        a.send('begin; ' + doc('a2') + "; select 'feed-a2-ready';")
+        a.wait_marker('feed-a2-ready')
+        b.send(doc('b2') + "; commit; select 'feed-b2-done';")
+        b.wait_marker('feed-b2-done')
+        b.finish()
+        third, cursor = drain('docs', cursor)
+        if any(row['path'] == 'a2' for row in third):
+            raise GateFailure('the doc feed served an uncommitted row')
+        a.send("commit; select 'feed-a2-done';")
+        a.wait_marker('feed-a2-done')
+        a.finish()
+    finally:
+        a.abort()
+        b.abort()
+    fourth, cursor = drain('docs', cursor)
+    served = [row['path'] for row in third + fourth]
+    if sorted(served) != ['a2', 'b2', 'x']:
+        raise GateFailure(f'the doc feed lost or repeated a row: {served}')
+
+    # 3. Two appends to one log: the second waits, then draws a larger id.
+    #    An append to another log does not wait.
+    a, b = session('log-a-' + suffix), session('log-b-' + suffix)
+    try:
+        a.send('begin; ' + log('c1', 'u@m', 'first') + "; select 'log-a-ready';")
+        a.wait_marker('log-a-ready')
+        _run(database_url, log('c1', 'v@m', 'other log') + ';', timeout=5)
+        b.send('begin; ' + log('c1', 'u@m', 'second') + "; commit; select 'log-b-done';")
+        wait_blocked('log-a-' + suffix, 'log-b-' + suffix)
+        logs_first, log_cursor = drain('logs', (0, 0))
+        if any(row['log_name'] == 'u@m' for row in logs_first):
+            raise GateFailure('the log feed served an uncommitted append')
+        a.send("commit; select 'log-a-done';")
+        a.wait_marker('log-a-done')
+        b.wait_marker('log-b-done')
+        a.finish()
+        b.finish()
+    finally:
+        a.abort()
+        b.abort()
+    ids = [int(value) for value in _run(
+        database_url,
+        f'select id from public.ab_logs where root = {_quote(root)} '
+        "and log_name = 'u@m' order by line;").stdout.split()]
+    if len(ids) != 2 or not ids[0] < ids[1]:
+        raise GateFailure(f'one log\'s ids do not follow commit order: {ids}')
+    logs_second, log_cursor = drain('logs', log_cursor)
+    named = sorted((row['log_name'], int(row['id'])) for row in logs_first + logs_second)
+    if [name for name, _ in named].count('u@m') != 2 or len(named) != 3:
+        raise GateFailure(f'the log feed lost or repeated an append: {named}')
+
+    # 4. A hard delete raises the floor: an older cursor is too old, the
+    #    current one is not; an empty delete leaves no floor.
+    _run(database_url, 'delete from public.ab_docs where root = '
+         + _quote(root) + " and path = 'no-such-path';")
+    if _scalar(database_url, 'select count(*) from public.ab_doc_floors '
+               f'where root = {_quote(root)};') != '0':
+        raise GateFailure('an empty delete raised the floor')
+    _run(database_url, 'delete from public.ab_docs where root = '
+         + _quote(root) + " and path = 'x';")
+    if not feed('docs', (0, 0))['too_old']:
+        raise GateFailure('a cursor below the floor was not too old')
+    if feed('docs', cursor)['too_old']:
+        raise GateFailure('a current cursor was answered too old')
+    horizon = int(_scalar(database_url,
+        'select pg_catalog.pg_snapshot_xmax(pg_catalog.pg_current_snapshot())'
+        '::text::bigint;'))
+    if not feed('docs', (horizon + 1000, 0))['too_old']:
+        raise GateFailure('a cursor from the future was not too old')
+
+
 def _validate_provider_admission(database_url: str) -> None:
     """Prospective admission reserves capacity and pins outcomes through closure."""
     root, actor = 'provider-admission', uuid4()
@@ -3556,6 +3709,7 @@ def main() -> int:
     _validate_terminal_readers(database_url)
     _validate_receipt_retirement(database_url)
     _validate_name_retention(database_url)
+    _validate_commit_ordered_feeds(database_url)
     _validate_provider_admission(database_url)
     if __package__:
         from devtools.provider_admission_race_gate import _validate_provider_admission_races
@@ -3577,6 +3731,8 @@ def main() -> int:
             "typed-log-append", "typed-chat-genesis",
             "typed-member-claim", "typed-member-leave",
             "name-retention", "name-one-owner",
+            "feed-late-commit", "feed-out-of-order-xid", "feed-log-commit-order",
+            "feed-floor-and-horizon",
             "typed-terminal-chat-delete", "typed-chat-delete-exact-prefix",
             "typed-room-terminal-lock",
             "typed-effect-claim", "typed-effect-state-chain",

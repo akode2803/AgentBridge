@@ -45,8 +45,9 @@ id has finished and can write nothing more. Any transaction id assigned
 later is at least every frontier seen before it.
 
 - `ab_docs` and `ab_logs` gain `txid xid8`, set to `pg_current_xact_id()`
-  (the top-level transaction, also inside subtransactions): for docs inside
-  the existing `ab_docs_touch` trigger, for logs in the new trigger of B.
+  (the top-level transaction, also inside subtransactions): for docs in a
+  small trigger of its own (`ab_docs_txid`, so `ab_docs_touch` keeps one
+  definition), for logs in the new trigger of B.
   The column is added with the constant default `'0'` (no table rewrite).
 - Two feed RPCs replace the direct reads: the doc delta and the root-wide
   changed-logs feed. Each returns **one jsonb value**, computed in one SQL

@@ -6,7 +6,8 @@ review. Scratch schema applied and its rolled-back acceptance passed
 Aryan's HTTP check of the live channel passed before and after turning
 "Allow public access" off on Scratch
 (docs/provider-mutation-acceptance/20261017-private-pokes-http-results.json).
-Pending: the CI Postgres gate, and production when Aryan says so. Aryan decided both directions (DECISIONS.md
+Production (2026-10-18): the schema slice applied, and "Allow public
+access" turned off by Aryan. Aryan decided both directions (DECISIONS.md
 D-020; docs/FOUNDATION_REVIEW.md F2 and F5). This note covers only the
 first step. Generated names,
 server-owned handles, invites, root-owner eviction and bans come later (see

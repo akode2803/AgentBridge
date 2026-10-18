@@ -81,5 +81,15 @@
   "a public subscriber does not hear private pokes: during a rollout old and new clients do not hear each other, and the 45 s safety polls cover the gap",
   "with \"Allow public access\" off, a public join is refused: an un-updated client cannot join and falls back to polling"
  ],
- "scratch_setting_after": "Allow public access is OFF on Scratch from 2026-10-17"
+ "scratch_setting_after": "Allow public access is OFF on Scratch from 2026-10-17",
+ "production_setting_after": {
+  "date": "2026-10-18",
+  "project": "eakewaaqbilmtswbbxix",
+  "setting": "Allow public access is OFF (Realtime settings)",
+  "changed_by": "Aryan, in the Supabase dashboard; authorized: \"you can update the client on this machine and turn off the access\"",
+  "policies": "ab_poke_receive and ab_poke_send, applied 2026-10-18 with the name slice (20261018-production-name-retention-results.json)",
+  "client_on_this_machine": "v0.24.378 or later (private join with the session token)",
+  "partitions_before": "latest realtime.messages partition messages_2026_10_15 (read-only check 2026-10-18): the first private join fails once with MissingPartition and is retried, as on Scratch",
+  "effect": "public joins are refused; a client older than v0.24.378 can no longer join and falls back to its 45-second polling"
+ }
 }

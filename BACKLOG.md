@@ -312,7 +312,7 @@ moment it is made, so a large task list never lives only in conversation.
   later with a smaller `ns` is never embedded. Not a commit-order issue;
   fix with P7's second half (server order per chat) or by tracking indexed
   message ids.
-- [~] **The `ab-<root>` poke channel is public** (review 2026-10-14): anyone
+- [x] **The `ab-<root>` poke channel is public** (review 2026-10-14): anyone
   with the publishable key can send pokes that make every process pull. Make
   it private now (Realtime authorization; "Allow public access" off), ahead
   of P2's per-user topics. **Agreed by Aryan 2026-10-17.** Built in
@@ -323,9 +323,12 @@ moment it is made, so a large task list never lives only in conversation.
   private pokes). Evidence:
   docs/provider-mutation-acceptance/20261017-private-pokes-http-results.json.
   Production: policies applied 2026-10-18 with the name slice; this
-  machine's client (~/Documents/GitHub/AgentBridge) is v0.24.378. Open:
-  turning "Allow public access" off (authorized by Aryan; he is signing in
-  to the dashboard in the browser pane).
+  machine's client (~/Documents/GitHub/AgentBridge) is v0.24.378. "Allow
+  public access" turned off on production by Aryan, 2026-10-18 (the
+  built-in browser would not take his sign-in; he used Chrome). Recorded
+  in the evidence file's `production_setting_after`. Production's
+  `realtime.messages` partitions ended at 2026-10-15, so the app's first
+  private join there fails once with MissingPartition and is retried.
 - [ ] **Root-wide work per delta tick** (review 2026-10-14): every tick runs
   `list_chat_ids`, and `ab_chat_ids` scans the root's logs and chat docs,
   so cost grows with total history. Replace it with membership changes on

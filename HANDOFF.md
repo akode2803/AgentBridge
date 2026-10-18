@@ -2116,11 +2116,10 @@ acceptance passed
 (docs/provider-mutation-acceptance/20261017-name-retention-results.json);
 Aryan's live-channel check (devtools/validate_private_pokes_http.py) passed
 on Scratch before and after turning off "Allow public access", which is now
-off there
+off there and, since 2026-10-18, on production too
 (docs/provider-mutation-acceptance/20261017-private-pokes-http-results.json).
 A fresh project has no `realtime.messages` partitions until the first
 private join, which fails once with "MissingPartition" and is retried.
-Pending:
-- the CI Postgres gate on push;
-- production, only when Aryan says so, after the read-only checks in the
-  note's Rollout.
+The CI Postgres gate passes. Production (2026-10-18): the schema slice is
+applied and "Allow public access" is off; the first private join there
+fails once with MissingPartition and is retried.
