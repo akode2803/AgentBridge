@@ -1,6 +1,17 @@
 # Cloud source handoff
 
-## 2026-10-18 commit-ordered feeds (P7) — v0.24.379
+## 2026-10-18 commit-ordered feeds (P7) — v0.24.379, review fixes v0.24.380
+
+2026-10-20: an independent review of the client found eight issues, all
+fixed in v0.24.380 (docs/COMMIT_ORDERED_CURSORS.md "Review of the build"):
+a membership change re-reads the chat; an undecided schema probe raises
+instead of guessing legacy; 24 h only with the feeds (6 h without);
+write-guard-skipped paths are re-read; prefixes keep their slash; one
+failing chat no longer stalls the delta; keyset reads must advance;
+revoked-mid-pull chats are not drift. Schema: members may hard-delete
+tombstones only, and a live row's hard delete raises the floor to the
+deleting transaction (Scratch: `p7_review_live_floor_20261020`,
+20261020092230; the production slice must include the policy).
 
 Design: docs/COMMIT_ORDERED_CURSORS.md (revised after review; Aryan:
 "build revised P7: yes"). Schema (end of docs/supabase_schema.sql): `txid`
@@ -25,7 +36,16 @@ both feeds plan as index scans on their `(root, txid, …)` index. Aryan's
 hosted client check passed (devtools/validate_commit_ordered_feeds_http.py,
 root `p7-feeds-http-20261018`, 17/17, lags ~0.2 s; evidence
 docs/provider-mutation-acceptance/20261018-commit-ordered-feeds-http-results.json).
-Pending: production's schema (his go-ahead); the rollout step
+Production (2026-10-20, Aryan: "go ahead and apply P7 to production"): a
+rolled-back experiment first (real login's view unchanged, feeds answer,
+in-flight rows held back, members hard-delete tombstones but not live
+docs, floor, log order, index scans), then migration
+`p7_commit_ordered_feeds_20261020` (slice behind a 5 s lock timeout); all
+six function bodies match the slice; the advisor shows nothing from P7.
+Evidence: docs/provider-mutation-acceptance/20261020-production-p7-*.
+Existing rows carry txid 0, so each client's first feed read pulls its
+root once. The app on this Mac was started on v0.24.380 for Aryan's test.
+Pending: a live run on production; the rollout step
 `idle_in_transaction_session_timeout = 60s` per project.
 
 ## 2026-10-14 deleted-chat cleanup (D-018)

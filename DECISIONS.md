@@ -76,6 +76,10 @@ pending), **taken** (a path was chosen and shipped or designed), **deferred**
     the zero-drift streak resets (no stretch to a week until it holds
     again). The change ledger: to be discussed in detail before any
     change.
+  - 2026-10-20: Aryan confirmed that reading of the streak ("reset the
+    timer if something is found missed": any drift restarts it) and had
+    P7 applied to production, including the tombstones-only member delete
+    policy (docs/provider-mutation-acceptance/20261020-production-p7-*).
 - **Why now:** nothing typed is activated and production holds no typed
   data. After activation, P1, P10 and the wrap layout become migrations on
   every user's machine.

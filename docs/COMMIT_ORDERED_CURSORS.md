@@ -1,7 +1,8 @@
 # Commit-ordered cursors, join catch-up and "cursor too old"
 
 Status: built in v0.24.379 (2026-10-18): schema, CI gate, client, unit
-tests; applied on Scratch. Production waits for Aryan's go-ahead. Design
+tests; applied on Scratch; the hosted client check passed. Review fixes in
+v0.24.380 (2026-10-20, "Review of the build" below). Production waits for Aryan's go-ahead. Design
 revised after an independent review (two blockers and eight should-fixes,
 all folded in below). Aryan agreed the
 direction on 2026-10-17 (DECISIONS.md D-020: P7 plus a scoped catch-up on
@@ -145,12 +146,17 @@ each log's ids follow commit order:
   txid xid8, seq bigint)`; `ab_change_epochs` cannot hold it, because
   `ab_recovery_epochs_immutable` refuses every update there and would abort
   every hard delete.
-- The existing statement-level AFTER DELETE trigger on `ab_docs` raises it
-  with `greatest()` to the largest `(txid, seq)` among the deleted rows,
-  and does nothing when no row was deleted (the janitor's frequent empty
-  purges fire statement triggers too). Every hard-delete path is covered:
-  the janitor, a future pg_cron job, an operator. Account rows never move
-  it: their delete is skipped before it happens.
+- A statement-level AFTER DELETE trigger on `ab_docs` raises it, and does
+  nothing when no row was deleted (the janitor's frequent empty purges fire
+  statement triggers too). A purged tombstone raises it to the tombstone's
+  own `(txid, seq)`: a reader past the tombstone already applied the
+  delete. A live row (corrected by the build review, 2026-10-20) raises it
+  to the deleting transaction, `(txid, 1)`: no reader can learn of that
+  delete from the feed, so every cursor up to it is too old. Members may
+  hard-delete tombstones only (the member delete policy now requires
+  `deleted`), so a live row's delete is an operator's, and no member can
+  force every reader in the root into a full pull with one cheap delete.
+  Account rows never move it: their delete is skipped before it happens.
 - The doc feed reads the floor in the same statement as its page and
   answers `too_old` when the caller's frontier is below it. The mirror then
   does a full pull. Logs need no floor: only a deleted chat's logs are
@@ -166,6 +172,13 @@ each log's ids follow commit order:
 
 ## E. The full pull becomes a safety net
 
+As built: 24 h only while the mirror's cursor is commit-ordered; a mirror
+on a project without the feed RPCs keeps 6 h, since its delta can still
+skip a late commit. Drift leaves out this process's recent writes, paths
+the write guard skipped (they are read again next tick), chats not caught
+up, and chats with no meta row in the pull (revoked while it ran). Any
+drift restarts the zero-drift streak (`mirror_status()["drift"]`).
+
 - After A to D it is needed only after `too_old`, a new epoch, a missing or
   old-format cursor, and for faults no one has found yet.
 - Proposal: keep the per-process timer but raise `reconcile_s` from 6 h to
@@ -176,6 +189,31 @@ each log's ids follow commit order:
   use, stretch the timer to a week. One full pull at the 1,000-user target
   is several MB per process, so four a day down to one cuts that egress by
   three quarters before any stretch.
+
+## Review of the build (2026-10-20)
+
+An independent review of the client (commit `6f2693a`) found eight issues;
+all are fixed in v0.24.380:
+
+1. Removed and re-added between two ticks, a member's delta skipped what
+   the chat wrote meanwhile. A delta that brings a chat meta whose
+   `members` changed (a re-add stamps a new `joined_ns`) now re-reads that
+   chat.
+2. A network fault before the first schema probe read as "legacy": a full
+   pull could return tombstones as live docs and a delete could hard-delete.
+   The probe now retries and then raises until it has a verdict.
+3. The 24 h interval applied without the feeds too (now 6 h there, above).
+4. A value the write guard skipped could be a newer foreign write the
+   cursor had passed; such paths are read again on the next tick.
+5. `_check` strips a prefix's trailing slash, so `chats/c9/` also matched
+   `chats/c90/`; prefixes keep it now.
+6. One chat whose catch-up read failed (or whose id fails validation)
+   stalled every delta; each chat now fails alone and retries next tick.
+7. A keyset read that does not advance now raises instead of looping.
+8. A chat revoked during a full pull counted as drift; it no longer does.
+
+Also from the review: the legacy log feed restarts at the root's newest
+row id instead of 0, and a live row's hard delete raises the floor (D).
 
 ## Liveness
 

@@ -145,6 +145,15 @@ def _is_missing_column(err: Exception) -> bool:
     return any(m in s for m in _MISSING_COL_MARKS)
 
 
+def _checked_prefix(prefix: str) -> str:
+    """A validated path prefix that keeps its trailing slash: ``_check``
+    strips it, and ``chats/c9`` would also match ``chats/c90/...``."""
+    if not prefix:
+        return ""
+    checked = _check(prefix)
+    return checked + "/" if prefix.replace("\\", "/").endswith("/") else checked
+
+
 def _feed_basis(epoch: Any) -> str:
     """The FeedCursor basis of the commit-ordered feeds under ``epoch``."""
     if epoch is not None and type(epoch) is not str:
@@ -577,18 +586,22 @@ class SupabaseTransport(Transport):
         return out
 
     # ------------------------------------------------------------ delta probe
-    def _delta_ok(self) -> bool:
+    def _delta_ok(self, *, strict: bool = True) -> bool:
         """Is the R76 migration (ab_docs.seq/deleted) live? Probes once; a
         legacy verdict re-probes every ``_DELTA_REPROBE_S`` so pasting the
         migration upgrades the fleet within a minute, no restart. A NETWORK
         fault leaves the verdict unchanged (never downgrades a working
-        delta mode to legacy full snapshots)."""
+        delta mode to legacy full snapshots). Before the first verdict a
+        network fault RAISES (``strict``): read as "legacy", a full pull
+        would return tombstones as live docs and a delete would hard-delete
+        a row other mirrors hold. Only diagnostics pass ``strict=False``."""
         if self._delta is True:
             return True
         if self._delta is False and time.monotonic() < self._delta_reprobe:
             return False
         try:
-            self._sb().table("ab_docs").select("seq").limit(1).execute()
+            self._retry(lambda: self._sb().table("ab_docs").select("seq")
+                        .limit(1).execute())
             self._delta = True
         except Exception as e:  # noqa: BLE001
             if _is_missing_column(e):
@@ -596,16 +609,18 @@ class SupabaseTransport(Transport):
                 self._delta_reprobe = time.monotonic() + _DELTA_REPROBE_S
             elif self._delta is None:
                 # can't tell yet (offline?) — stay unprobed, decide later
+                if strict:
+                    raise
                 return False
         return bool(self._delta)
 
     # ------------------------------------------ commit-ordered feeds (P7)
     def _feeds_ok(self) -> bool:
         """Are the commit-ordered feed RPCs live (docs/COMMIT_ORDERED_CURSORS.md)?
-        A missing function re-probes every ``_DELTA_REPROBE_S``, like
-        ``_delta_ok``. Unlike it, a network fault before the first verdict
-        RAISES: guessing "legacy" would hand out a cursor of the wrong kind
-        and cost a needless full pull once the network is back."""
+        A missing function re-probes every ``_DELTA_REPROBE_S``, and, as in
+        ``_delta_ok``, a network fault before the first verdict RAISES:
+        guessing "legacy" would hand out a cursor of the wrong kind and cost
+        a needless full pull once the network is back."""
         if self._feeds is True:
             return True
         if self._feeds is False and time.monotonic() < self._feeds_reprobe:
@@ -1441,7 +1456,7 @@ class SupabaseTransport(Transport):
         Unlike ``get_doc`` this RAISES on failure: the mirror must be able to
         tell 'the store is empty' apart from 'the network is down' (stale
         beats vanished)."""
-        prefix = _check(prefix) if prefix else ""
+        prefix = _checked_prefix(prefix)
         rows = self._keyset_docs(prefix, "path,data", live_only=self._delta_ok())
         return {str(r["path"]): r["data"] for r in rows}
 
@@ -1471,6 +1486,8 @@ class SupabaseTransport(Transport):
             if not rows:
                 return out
             out.extend(r for r in rows if str(r["path"]).startswith(prefix))
+            if last is not None and str(rows[-1]["path"]) <= last:
+                raise TransportError("Supabase keyset doc read did not advance")
             last = str(rows[-1]["path"])
 
     # ------------------------------------------------------- delta feed (R76)
@@ -1712,7 +1729,10 @@ class SupabaseTransport(Transport):
         seen them (the storage janitor calls this on its daily sweep).
         Account rows (``users/``) are kept forever: their tombstone keeps the
         name taken, and the server skips their hard delete anyway."""
-        if not self._delta_ok():
+        try:
+            if not self._delta_ok():
+                return
+        except Exception:  # noqa: BLE001 — offline: the next sweep retries
             return
         cutoff = time.time() - older_than_days * 86400
         iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(cutoff))
@@ -1725,7 +1745,7 @@ class SupabaseTransport(Transport):
             pass
 
     def list_docs(self, prefix: str) -> list[str]:
-        prefix = _check(prefix) if prefix else ""
+        prefix = _checked_prefix(prefix)
         def fetch():
             q = self._sb().table("ab_docs").select("path").eq("root", self.root)
             if self._delta_ok():
@@ -1797,7 +1817,7 @@ class SupabaseTransport(Transport):
             return self._logs_feed(cursor)
         if isinstance(cursor, FeedCursor):
             raise CursorTooOld("the commit-ordered log feed is unavailable",
-                               restart=0)
+                               restart=self._log_head())
         rows = self._retry(
             lambda: self._sb().table("ab_logs").select("id,chat_id,log_name")
             .eq("root", self.root).gt("id", int(cursor)).order("id")
@@ -1815,6 +1835,15 @@ class SupabaseTransport(Transport):
                 seen.add(key)
                 pairs.append(key)
         return pairs, new_cursor
+
+    def _log_head(self) -> int:
+        """The root's newest ``ab_logs`` id: where the pre-P7 feed restarts
+        after the caller's scan (0 would walk every row, 1,000 a tick)."""
+        rows = self._retry(lambda: self._sb().table("ab_logs").select("id")
+                           .eq("root", self.root).order("id", desc=True)
+                           .limit(1).execute()).data
+        self._count(rows)
+        return int(rows[0]["id"]) if rows else 0
 
     def _logs_feed(self, cursor: Any) -> tuple[list[tuple[str, str]], FeedCursor]:
         if (not isinstance(cursor, FeedCursor)

@@ -79,6 +79,23 @@ from .mirror_observation import (
 __all__ = ["CachingTransport"]
 
 
+# Without the commit-ordered feeds (a cursor with no basis) the delta can
+# still skip a late commit, so the full pull keeps its pre-P7 interval.
+_COUNTER_RECONCILE_S = 6 * 3600.0
+
+
+def _meta_chat(path: str) -> str | None:
+    """The chat id of a ``chats/<id>/meta.json`` path, else None."""
+    parts = path.split("/")
+    if len(parts) == 3 and parts[0] == "chats" and parts[2] == "meta.json":
+        return parts[1]
+    return None
+
+
+def _members(doc: Any) -> Any:
+    return doc.get("members") if isinstance(doc, dict) else None
+
+
 def _split_cursor(cursor: Any) -> tuple[int, str, Any]:
     """``(position, basis, row_positions)`` of a driver's cursor: a plain
     int is the driver's own counter (basis ""), a FeedCursor names its basis."""
@@ -220,6 +237,10 @@ class CachingTransport(Transport):
         # the next delta tick that reconciles visibility.
         self._cursor_basis = ""
         self._caught_up: set[str] = set()
+        # Paths whose delta value the write guard skipped: it may have been
+        # a foreign write newer than ours, and the cursor has passed it, so
+        # the next delta tick reads each one again.
+        self._reread: set[str] = set()
         # P7 drift counting (docs/COMMIT_ORDERED_CURSORS.md E): rows a
         # scheduled full pull found that the delta feed should have
         # delivered. Wall-clock start of the current zero-drift streak.
@@ -638,6 +659,10 @@ class CachingTransport(Transport):
                 self._cursor = position
                 self._cursor_basis = basis
                 self._caught_up = visible
+                # the pull re-read everything except paths it kept for this
+                # process's newer local write; those are read again next tick
+                self._reread = {path for path, wrote in self._doc_writes.items()
+                                if wrote >= t0}
                 self._mirror_provenance = "provider_observed"
                 self._last_refresh = time.time()
                 self._last_full = time.monotonic()
@@ -675,11 +700,14 @@ class CachingTransport(Transport):
         not caught up (their older docs were never read) are left out."""
         drift = 0
         for path in set(previous) | set(pulled):
-            if path in self._doc_writes:
+            if path in self._doc_writes or path in self._reread:
                 continue
             if path.startswith("chats/"):
                 chat_id = path.split("/")[1]
-                if chat_id not in self._caught_up or chat_id not in visible:
+                # a chat that left the visible set during the pull has no
+                # meta row in it: its docs are gone by revocation, not drift
+                if (chat_id not in self._caught_up or chat_id not in visible
+                        or f"chats/{chat_id}/meta.json" not in positions):
                     continue
             if previous.get(path, _MISS) == pulled.get(path, _MISS):
                 continue
@@ -728,11 +756,20 @@ class CachingTransport(Transport):
             stored = (FeedCursor(self._cursor, self._cursor_basis)
                       if self._cursor_basis else self._cursor)
             caught_up = set(self._caught_up)
+            reread = set(self._reread)
         try:
             changed, deleted, cursor = self.inner.get_docs_delta(stored)
             position, _basis, _ = _split_cursor(cursor)
-            changed, authority_unsafe = detach_ingress_documents(copy.deepcopy(dict(changed)))
-            deleted = set(deleted)
+            changed, deleted = dict(changed), set(deleted)
+            for path in sorted(reread - set(changed) - deleted):
+                # an exact keyset read: unlike get_doc it raises when offline
+                # instead of reading as "missing"
+                value = self.inner.get_docs(path).get(path, _MISS)
+                if value is _MISS:
+                    deleted.add(path)
+                else:
+                    changed[path] = value
+            changed, authority_unsafe = detach_ingress_documents(copy.deepcopy(changed))
             selection_keys_valid = (
                 _selection_keys_valid(changed)
                 and all(type(path) is str and _valid_path(path)
@@ -752,10 +789,24 @@ class CachingTransport(Transport):
             # above already fixed its frontier, so every row below it had
             # committed before these reads began; newer rows come again in
             # the next delta (idempotent).
+            # A chat whose membership changed is read again: if this member
+            # was removed and re-added between two ticks, the delta skipped
+            # whatever the chat wrote while they could not see it.
+            with self._lock:
+                regrown = {
+                    chat_id for chat_id in (
+                        _meta_chat(path) for path in changed)
+                    if chat_id in caught_up
+                    and _members(changed[f"chats/{chat_id}/meta.json"])
+                    != _members(self._docs.get(f"chats/{chat_id}/meta.json"))
+                }
             caught: dict[str, dict[str, Any]] = {}
             caught_unsafe: set[str] = set()
-            for chat_id in sorted((visible_ids or set()) - caught_up):
-                caught[chat_id] = self.inner.get_docs(f"chats/{chat_id}/")
+            for chat_id in sorted((visible_ids or set()) - (caught_up - regrown)):
+                try:
+                    caught[chat_id] = self.inner.get_docs(f"chats/{chat_id}/")
+                except Exception:  # noqa: BLE001 — that chat retries next tick
+                    continue       # one bad chat must not stall the delta
             if caught:
                 merged, caught_unsafe = detach_ingress_documents(copy.deepcopy(
                     {p: v for docs in caught.values() for p, v in docs.items()}))
@@ -785,9 +836,11 @@ class CachingTransport(Transport):
                 observed_ids = visible_ids if visible_ids is not None else current_ids
                 revoked_ids = current_ids - observed_ids - recent_ids
                 foreign = bool(revoked_ids)
+                self._reread.difference_update(reread)
                 for path, val in changed.items():
                     wrote = self._doc_writes.get(path)
                     if wrote is not None and wrote >= t0:
+                        self._reread.add(path)
                         continue           # our newer local write wins this cycle
                     value_changed = self._docs.get(path, _MISS) != val
                     safety_changed = ((path in self._authority_unsafe)
@@ -805,6 +858,7 @@ class CachingTransport(Transport):
                 for path in deleted:
                     wrote = self._doc_writes.get(path)
                     if wrote is not None and wrote >= t0:
+                        self._reread.add(path)
                         continue
                     existed = path in self._docs or path in self._authority_unsafe
                     if (path in self._docs
@@ -838,6 +892,7 @@ class CachingTransport(Transport):
                                  if p.startswith(prefix) and p not in chat_docs]:
                         wrote = self._doc_writes.get(path)
                         if wrote is not None and wrote >= t0:
+                            self._reread.add(path)
                             continue
                         if not (silent and path.startswith(silent)):
                             foreign = True
@@ -848,6 +903,7 @@ class CachingTransport(Transport):
                     for path, val in chat_docs.items():
                         wrote = self._doc_writes.get(path)
                         if wrote is not None and wrote >= t0:
+                            self._reread.add(path)
                             continue
                         value_changed = self._docs.get(path, _MISS) != val
                         safety_changed = ((path in self._authority_unsafe)
@@ -865,7 +921,8 @@ class CachingTransport(Transport):
                 self._authority_unsafe.intersection_update(self._docs)
                 self._chat_ids = sorted(observed_ids | recent_ids)
                 self._caught_up = (
-                    (self._caught_up | set(caught)) & set(self._chat_ids))
+                    ((self._caught_up - regrown) | set(caught))
+                    & set(self._chat_ids))
                 if changed or deleted or caught:
                     self._neg.clear()      # the world moved: re-answer misses
                 self._cursor = max(self._cursor, position)
@@ -972,8 +1029,11 @@ class CachingTransport(Transport):
         """Delta when possible; full when due (reconcile), forced (no feed /
         legacy schema), or the mirror is cold. Returns whether docs moved."""
         prof = self.profile
-        reconcile_due = (prof.reconcile_s > 0 and
-                         time.monotonic() - self._last_full >= prof.reconcile_s)
+        reconcile_s = prof.reconcile_s
+        if reconcile_s > 0 and not self._cursor_basis:
+            reconcile_s = min(reconcile_s, _COUNTER_RECONCILE_S)
+        reconcile_due = (reconcile_s > 0 and
+                         time.monotonic() - self._last_full >= reconcile_s)
         if self._warm and prof.supports_doc_delta and not reconcile_due:
             try:
                 return self._refresh_delta()

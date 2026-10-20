@@ -241,12 +241,18 @@ class FakeQuery:
         if op == "delete":
             keep = [r for r in rows if not self._match(r)]
             gone = len(rows) - len(keep)
-            if self.table == "ab_docs":
-                # ab_docs_floor: a hard delete raises the root's purge floor
+            if self.table == "ab_docs" and gone:
+                # ab_docs_floor: a purged tombstone raises the root's floor
+                # to its own position; a live row to the deleting transaction
                 floors = self.db.setdefault("_doc_floors", {})
+                deleting = None
                 for r in rows:
                     if self._match(r):
-                        key = (r.get("txid", 0), r.get("seq", 0))
+                        if r.get("deleted"):
+                            key = (r.get("txid", 0), r.get("seq", 0))
+                        else:
+                            deleting = deleting or _write_xid(self.db)
+                            key = (deleting, 1)
                         if key > floors.get(r["root"], (-1, -1)):
                             floors[r["root"]] = key
             rows[:] = keep

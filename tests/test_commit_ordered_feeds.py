@@ -399,3 +399,185 @@ def test_driver_parameters_match_the_schema_signatures(tmp_path, clouds):
     tx.get_docs_delta(cursor)
     tx.changed_logs(cursor)
     assert {fn: sent[fn] for fn in declared} == declared
+
+
+# ------------------------------------------- review findings (2026-10-20)
+
+def test_hard_deleting_a_live_row_makes_every_older_cursor_too_old(tmp_path, clouds):
+    """Only an operator can do this (members may purge tombstones only),
+    and no reader could learn of it from the feed."""
+    tx = clouds.bare(tmp_path / "r")
+    client = clouds.client(tmp_path / "r")
+    tx.put_doc("status/a.json", {"v": 1})
+    _, before = tx.snapshot_docs()
+    client.table("ab_docs").delete().eq("root", tx.root) \
+        .eq("path", "status/a.json").execute()
+    with pytest.raises(CursorTooOld):
+        tx.get_docs_delta(before)
+    _, after = tx.snapshot_docs()
+    assert tx.get_docs_delta(after) == ({}, set(), after)
+
+
+def test_an_undecided_schema_probe_never_guesses_legacy(tmp_path, clouds, monkeypatch):
+    monkeypatch.setattr(supabase_mod, "_RETRY_WAIT", 0)
+    client = clouds.client(tmp_path / "r")
+    tx = clouds.bare(tmp_path / "r")
+    tx.put_doc("users/a.json", {"v": 1})
+    tx._delta = None                           # a fresh process
+    offline = {"on": True}
+    table = client.table
+
+    def flaky(name):
+        query = table(name)
+        select = query.select
+
+        def probe(cols="*"):
+            if cols == "seq" and offline["on"]:
+                raise ConnectionError("network down")
+            return select(cols)
+        query.select = probe
+        return query
+
+    client.table = flaky
+    with pytest.raises(ConnectionError):
+        tx.delete_doc("users/a.json")          # never a hard delete
+    with pytest.raises(ConnectionError):
+        tx.snapshot_docs()                     # never tombstones as live docs
+    with pytest.raises(ConnectionError):
+        tx.changed_logs(FeedCursor(1, "frontier:x"))
+    assert tx._delta is None and tx._feeds is None
+    assert [r["path"] for r in client.db["ab_docs"]] == ["users/a.json"]
+    offline["on"] = False
+    tx.delete_doc("users/a.json")              # now a soft delete
+    assert client.db["ab_docs"][0]["deleted"] is True
+
+
+def test_a_prefix_read_keeps_its_slash(tmp_path, clouds):
+    tx = clouds.bare(tmp_path / "r")
+    tx.put_doc("chats/c9/meta.json", {"name": "nine"})
+    tx.put_doc("chats/c90/meta.json", {"name": "ninety"})
+    assert list(tx.get_docs("chats/c9/")) == ["chats/c9/meta.json"]
+    assert tx.list_docs("chats/c9/") == ["chats/c9/meta.json"]
+
+
+def test_a_keyset_read_that_does_not_advance_raises(tmp_path, clouds, monkeypatch):
+    monkeypatch.setattr(supabase_mod, "_DOC_PAGE", 2)
+    tx = clouds.bare(tmp_path / "r")
+    client = clouds.client(tmp_path / "r")
+    for name in "abc":
+        tx.put_doc(f"d/{name}.json", {"v": name})
+    table = client.table
+
+    def stuck(name):
+        query = table(name)
+        query.gt = lambda col, val: query    # the server ignores `path > last`
+        return query
+
+    client.table = stuck
+    with pytest.raises(supabase_mod.TransportError, match="did not advance"):
+        tx.get_docs("d/")
+
+
+def test_without_the_feeds_the_full_pull_keeps_its_six_hours(tmp_path, clouds):
+    client = clouds.client(tmp_path / "r")
+    client.db["_feeds"] = False
+    legacy = clouds.cached(tmp_path / "r")
+    assert legacy._cursor_basis == ""
+    pulls = []
+    snapshot = legacy.inner.snapshot_docs
+    legacy.inner.snapshot_docs = lambda: pulls.append(1) or snapshot()
+    legacy._last_full = time.monotonic() - 7 * 3600
+    legacy._refresh_tick()
+    assert pulls == [1]
+
+    client.db["_feeds"] = True
+    current = clouds.cached(tmp_path / "r2")
+    assert current._cursor_basis.startswith("frontier:")
+    snapshot2 = current.inner.snapshot_docs
+    current.inner.snapshot_docs = lambda: pulls.append(2) or snapshot2()
+    current._last_full = time.monotonic() - 7 * 3600
+    current._refresh_tick()
+    assert pulls == [1]                        # still on the delta
+
+
+def test_a_membership_change_reads_the_chat_again(tmp_path, clouds):
+    """Removed and re-added between two ticks: the delta skipped what the
+    chat wrote meanwhile; the re-add's new joined_ns triggers a re-read."""
+    writer = clouds.bare(tmp_path / "r")
+    writer.put_doc("chats/c9/meta.json", {"members": {"ann": {"joined_ns": 1}}})
+    writer.put_doc("chats/c9/redactions.json", {"m1": True})
+    mirror = clouds.cached(tmp_path / "r")
+    del mirror._docs["chats/c9/redactions.json"]   # written while hidden
+    assert "c9" in mirror._caught_up
+    writer.put_doc("chats/c9/meta.json", {"members": {"ann": {"joined_ns": 2}}})
+    mirror._refresh_tick()
+    assert mirror.get_doc("chats/c9/redactions.json") == {"m1": True}
+    reads = []
+    get_docs = mirror.inner.get_docs
+    mirror.inner.get_docs = lambda prefix="": reads.append(prefix) or get_docs(prefix)
+    writer.put_doc("chats/c9/meta.json", {"members": {"ann": {"joined_ns": 2}},
+                                          "name": "renamed"})
+    mirror._refresh_tick()
+    assert reads == []                         # a rename is not a re-read
+
+
+def test_one_failing_chat_does_not_stall_the_delta(tmp_path, clouds):
+    writer = clouds.bare(tmp_path / "r")
+    writer.put_doc("chats/ok/meta.json", {"name": "ok"})
+    writer.put_doc("chats/bad/meta.json", {"name": "bad"})
+    mirror = clouds.cached(tmp_path / "r")
+    _forget_chat(mirror, "ok")
+    _forget_chat(mirror, "bad")
+    get_docs = mirror.inner.get_docs
+
+    def failing(prefix=""):
+        if prefix == "chats/bad/":
+            raise ConnectionError("this chat's read keeps failing")
+        return get_docs(prefix)
+
+    mirror.inner.get_docs = failing
+    writer.put_doc("users/news.json", {"v": 1})
+    mirror._refresh_tick()
+    assert mirror.get_doc("users/news.json") == {"v": 1}
+    assert mirror.get_doc("chats/ok/meta.json") == {"name": "ok"}
+    assert "ok" in mirror._caught_up and "bad" not in mirror._caught_up
+    mirror.inner.get_docs = get_docs
+    mirror._refresh_tick()                     # retried on the next tick
+    assert "bad" in mirror._caught_up
+
+
+def test_a_guard_skipped_value_is_read_again_next_tick(tmp_path, clouds):
+    writer = clouds.bare(tmp_path / "r")
+    mirror = clouds.cached(tmp_path / "r")
+    mirror.put_doc("users/p.json", {"v": "mine"})
+    writer.put_doc("users/p.json", {"v": "theirs, newer"})
+    # our write landed while the tick's delta was in flight
+    mirror._doc_writes["users/p.json"] = time.monotonic() + 3600
+    mirror._refresh_tick()
+    assert mirror.get_doc("users/p.json") == {"v": "mine"}
+    assert "users/p.json" in mirror._reread
+    mirror._doc_writes["users/p.json"] = time.monotonic() - 3600
+    mirror._refresh_tick()                     # the delta has passed it
+    assert mirror.get_doc("users/p.json") == {"v": "theirs, newer"}
+    assert mirror._reread == set()
+
+
+def test_a_chat_revoked_during_the_pull_is_not_drift(tmp_path, clouds):
+    writer = clouds.bare(tmp_path / "r")
+    writer.put_doc("chats/c1/meta.json", {"name": "Room"})
+    writer.put_doc("chats/c1/pins/p.json", {"pin": 1})
+    mirror = clouds.cached(tmp_path / "r")
+    snapshot = mirror.inner.snapshot_docs
+
+    def revoked_mid_pull():
+        docs, cursor = snapshot()
+        hidden = [p for p in docs if p.startswith("chats/c1/")]
+        for path in hidden:
+            del docs[path]
+            del cursor.row_positions[path]
+        return docs, cursor
+
+    mirror.inner.snapshot_docs = revoked_mid_pull
+    mirror._last_full = time.monotonic() - mirror.profile.reconcile_s - 1
+    mirror._refresh_tick()
+    assert mirror.mirror_status()["drift"]["last"] == 0

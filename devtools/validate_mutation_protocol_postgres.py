@@ -3456,19 +3456,35 @@ def _validate_commit_ordered_feeds(database_url: str) -> None:
     if [name for name, _ in named].count('u@m') != 2 or len(named) != 3:
         raise GateFailure(f'the log feed lost or repeated an append: {named}')
 
-    # 4. A hard delete raises the floor: an older cursor is too old, the
-    #    current one is not; an empty delete leaves no floor.
+    # 4. Purging a tombstone raises the floor to the tombstone: an older
+    #    cursor is too old, one past the tombstone is not. Hard-deleting a
+    #    live row raises it to the deleting transaction: every cursor read
+    #    before is too old. An empty delete leaves no floor.
     _run(database_url, 'delete from public.ab_docs where root = '
          + _quote(root) + " and path = 'no-such-path';")
     if _scalar(database_url, 'select count(*) from public.ab_doc_floors '
                f'where root = {_quote(root)};') != '0':
         raise GateFailure('an empty delete raised the floor')
+    _run(database_url, 'update public.ab_docs set deleted = true where root = '
+         + _quote(root) + " and path = 'x';")
+    tombstoned, cursor = drain('docs', cursor)
+    if [row['path'] for row in tombstoned] != ['x'] or not tombstoned[0]['deleted']:
+        raise GateFailure('the doc feed did not serve the tombstone')
     _run(database_url, 'delete from public.ab_docs where root = '
          + _quote(root) + " and path = 'x';")
     if not feed('docs', (0, 0))['too_old']:
         raise GateFailure('a cursor below the floor was not too old')
     if feed('docs', cursor)['too_old']:
-        raise GateFailure('a current cursor was answered too old')
+        raise GateFailure('a cursor past the purged tombstone was answered too old')
+    _run(database_url, 'delete from public.ab_docs where root = '
+         + _quote(root) + " and path = 'a';")
+    if not feed('docs', cursor)['too_old']:
+        raise GateFailure('a cursor read before a live row\'s hard delete was not too old')
+    _, cursor = drain('docs', (int(json.loads(_scalar(
+        database_url, f'select public.ab_feeds_frontier({_quote(root)})::text;'
+    ))['frontier']), 0))
+    if feed('docs', cursor)['too_old']:
+        raise GateFailure('a cursor read after a live row\'s hard delete was answered too old')
     horizon = int(_scalar(database_url,
         'select pg_catalog.pg_snapshot_xmax(pg_catalog.pg_current_snapshot())'
         '::text::bigint;'))

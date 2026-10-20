@@ -306,7 +306,14 @@ moment it is made, so a large task list never lives only in conversation.
   pulls, 24 h reconcile with drift). Scratch: applied, index scans
   confirmed; Aryan's hosted client check passed 2026-10-18 (17/17;
   docs/provider-mutation-acceptance/20261018-commit-ordered-feeds-http-results.json).
-  Open: production schema (his go-ahead),
+  Independent review of the client 2026-10-20: eight findings, all fixed
+  in v0.24.380 (the design note's "Review of the build"); the member
+  delete policy now allows tombstones only and a live row's hard delete
+  raises the floor (Scratch applied). Production applied 2026-10-20 on
+  Aryan's go-ahead (migration `p7_commit_ordered_feeds_20261020`, after a
+  rolled-back experiment; all six function bodies match the slice;
+  docs/provider-mutation-acceptance/20261020-production-p7-results.json).
+  Open: a live run on production (Aryan testing v0.24.380),
   `idle_in_transaction_session_timeout = 60s` per project.
 - [ ] **Decide whether to retire the change ledger with the node stack**
   (review of P7, 2026-10-18): once docs and logs are commit-ordered, the
@@ -476,6 +483,13 @@ moment it is made, so a large task list never lives only in conversation.
 - [ ] **Hardening: `ab_docs_touch` search_path** (Scratch advisor,
   2026-10-14): the clean-install trigger function has a mutable search_path;
   pin it to `pg_catalog, public` in the schema.
+- [ ] **Hardening: production advisor warnings** (production security
+  advisor after the P7 apply, 2026-10-20; none from P7): mutable
+  search_path on `ab_chat_of`, `ab_list_logs`, `ab_docs_touch`,
+  `ab_root_ok`; `anon` may execute the definer helpers `ab_can_read_chat`,
+  `ab_is_member`, `ab_member` (each keys on the caller's login, so likely
+  harmless; not verified, revoke from `anon` anyway); leaked-password protection is off (an Auth
+  setting, Aryan's call). Fix in the schema, then one production slice.
 - [ ] **Message overlays under a bound writer**: edits, redactions (delete for
   everyone) and pins use plain `put_doc`/`delete_doc` (mesh/overlays.py) and
   raise when bound. Classify: edits/redactions are immutable-ish records,

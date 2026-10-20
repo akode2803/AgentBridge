@@ -327,10 +327,15 @@ for update to authenticated using (
   and path not like 'chats/%/runtime/effects/%'
 );
 
+-- Members hard-delete only tombstones (the janitor's purge): a live row's
+-- hard delete never reaches another reader's delta feed, so it would force
+-- every reader in the root to pull everything (P7's floor). Deleting a doc
+-- is a soft delete (deleted = true); only an operator removes live rows.
 drop policy if exists ab_docs_member_delete on public.ab_docs;
 create policy ab_docs_member_delete on public.ab_docs
 for delete to authenticated using (
-  public.ab_root_ok(root) and (
+  deleted
+  and public.ab_root_ok(root) and (
     path not like 'chats/%'
     or public.ab_can_read_chat(root, public.ab_chat_of(path))
   )
@@ -5152,13 +5157,20 @@ execute function private.ab_docs_record_txid();
 -- but before the id is drawn: a second append to the same log waits until
 -- the first commits or rolls back, then draws a larger id. The identity
 -- value drawn before this trigger is discarded (ids are not dense anyway).
--- Named to fire after ab_mutation_legacy_gate (BEFORE triggers run in name
--- order), so every path takes the ledger lock first and this lock second.
+-- Lock order: the change ledger's shared root lock first, this log lock
+-- second, on every path. The trigger takes the ledger lock itself rather
+-- than rely on ab_mutation_legacy_gate (absent on a project without the
+-- typed protocol, where the ledger's own triggers take it only AFTER the
+-- row): a log-then-ledger writer could otherwise deadlock with a
+-- ledger-then-log one behind a queued exclusive page read, seal or fence.
+-- Re-taking a shared lock this transaction holds costs nothing.
 -- Definer: the inserting role has no right to call nextval directly. An
 -- import that must keep its ids disables this trigger on purpose.
 create or replace function private.ab_order_log_id()
 returns trigger language plpgsql security definer set search_path = pg_catalog as $$
 begin
+  perform pg_catalog.pg_advisory_xact_lock_shared(pg_catalog.hashtextextended(
+    'agentbridge-change-ledger:' || new.root, 0));
   perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
     'agentbridge-log-head:' || pg_catalog.jsonb_build_array(
       new.root, new.chat_id, new.log_name)::text,
@@ -5182,11 +5194,14 @@ create index if not exists ab_logs_feed_order
   on public.ab_logs (root, txid, id);
 
 -- "Cursor too old": a hard-deleted doc row leaves no trace in the feed, so
--- a reader whose cursor is below the newest such row may have missed it and
--- must pull everything. Every hard delete raises the root's floor to the
--- largest (txid, seq) it removed; in practice only the janitor's purge of
--- tombstones older than 30 days. Its own table: ab_change_epochs refuses
--- every update. An empty delete inserts nothing.
+-- a reader that may have missed it must pull everything. A purged tombstone
+-- raises the root's floor to its own (txid, seq): a reader past it already
+-- applied the delete. A live row (only an operator can hard-delete one; the
+-- member delete policy allows tombstones only) raises it to the deleting
+-- transaction itself, (txid, 1): no reader can learn of that delete from
+-- the feed, so every cursor up to it is too old. In practice the janitor's
+-- purge of tombstones older than 30 days. Its own table: ab_change_epochs
+-- refuses every update. An empty delete inserts nothing.
 create table if not exists public.ab_doc_floors (
   root text primary key,
   txid xid8 not null,
@@ -5203,9 +5218,15 @@ create or replace function private.ab_docs_raise_floor()
 returns trigger language plpgsql security definer set search_path = pg_catalog as $$
 begin
   insert into public.ab_doc_floors as f (root, txid, seq)
-  select distinct on (d.root) d.root, d.txid, d.seq
-  from old_rows d
-  order by d.root, d.txid desc, d.seq desc
+  select distinct on (c.root) c.root, c.txid, c.seq
+  from (
+    select d.root,
+           case when d.deleted then d.txid
+                else pg_catalog.pg_current_xact_id() end as txid,
+           case when d.deleted then d.seq else 1::bigint end as seq
+    from old_rows d
+  ) c
+  order by c.root, c.txid desc, c.seq desc
   on conflict (root) do update
     set txid = excluded.txid, seq = excluded.seq
     where (excluded.txid, excluded.seq) > (f.txid, f.seq);

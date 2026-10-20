@@ -1,0 +1,108 @@
+{
+ "check": "rolled-back production experiment, then the apply, of the P7 commit-ordered feeds slice",
+ "project": "production (eakewaaqbilmtswbbxix)",
+ "date": "2026-10-20",
+ "authority": "Aryan: \"go ahead and apply P7 to production\" (2026-10-20); safe experiments allowed since 2026-10-18",
+ "method": "one DO block through the Supabase MCP connector that applies the slice in its own transaction, observes, and always rolls back by its final exception; then apply_migration of the slice behind `set local lock_timeout = '5s'`",
+ "sql": "20261020-production-p7-experiment.sql",
+ "sql_sha256": "0cba47ea5cab82c9dd12a9aac632c1bf268924aa1d8ab9e716443fa0d9e35e65",
+ "slice": "20261020-production-p7-slice.sql",
+ "slice_sha256": "bb41cf1c43b742a303a8dff5f2a4b7f01d5ffb6fa8a4d0c4519fc5345ceab088",
+ "experiment_observed": {
+  "real_login_view_of_mesh2": {
+   "before": {
+    "member": true,
+    "roster": 1,
+    "docs": 4300,
+    "live_docs": 4300,
+    "chat_metas": 90,
+    "logs": 1286
+   },
+   "after": {
+    "member": true,
+    "roster": 1,
+    "docs": 4300,
+    "live_docs": 4300,
+    "chat_metas": 90,
+    "logs": 1286
+   },
+   "unchanged": true
+  },
+  "real_frontier_is_number": true,
+  "real_epoch_present": true,
+  "real_doc_page_rows": 1000,
+  "real_doc_page_has_more": true,
+  "real_doc_page_too_old": false,
+  "real_log_page_rows": 1000,
+  "real_log_page_has_more": true,
+  "real_log_page_too_old": false,
+  "own_inflight_doc_rows": 0,
+  "frontier_at_or_below_own_xact": true,
+  "member_live_delete_rows": 0,
+  "member_tombstone_delete_rows": 1,
+  "below_floor_too_old": true,
+  "floor_rows": 1,
+  "log_ids_follow_order": true,
+  "log_txid_is_this_xact": true,
+  "existing_doc_txids_zero": true,
+  "existing_log_txids_zero": true,
+  "triggers": [
+   "ab_docs_floor",
+   "ab_docs_txid",
+   "ab_order_log_id"
+  ],
+  "indexes": [
+   "ab_docs_feed_order",
+   "ab_logs_feed_order"
+  ],
+  "doc_feed_index": true,
+  "log_feed_index": true
+ },
+ "apply": {
+  "migration": "p7_commit_ordered_feeds_20261020",
+  "statement": "`set local lock_timeout = '5s';` followed by the slice verbatim",
+  "result": "success"
+ },
+ "verified_after": {
+  "function_body_sha256_match_slice": {
+   "private.ab_docs_record_txid": true,
+   "private.ab_order_log_id": true,
+   "private.ab_docs_raise_floor": true,
+   "public.ab_feeds_frontier": true,
+   "public.ab_docs_feed": true,
+   "public.ab_logs_feed": true
+  },
+  "triggers_ab_docs": [
+   "ab_docs_change_ledger",
+   "ab_docs_delete_scope_ledger",
+   "ab_docs_floor",
+   "ab_docs_keep_accounts",
+   "ab_docs_one_owner",
+   "ab_docs_touch",
+   "ab_docs_txid",
+   "ab_recovery_doc_identity",
+   "ab_recovery_docs_no_truncate"
+  ],
+  "triggers_ab_logs": [
+   "ab_logs_change_ledger",
+   "ab_logs_delete_scope_ledger",
+   "ab_order_log_id",
+   "ab_recovery_log_immutable",
+   "ab_recovery_log_stream_head",
+   "ab_recovery_logs_no_truncate"
+  ],
+  "indexes": [
+   "ab_docs_feed_order",
+   "ab_logs_feed_order"
+  ],
+  "txid_columns": [
+   "ab_docs.txid xid8 default '0'::xid8",
+   "ab_logs.txid xid8 default '0'::xid8"
+  ],
+  "member_delete_policy_requires_deleted": true,
+  "floor_rows": 0,
+  "last_migration": "p7_commit_ordered_feeds_20261020",
+  "security_advisor": "no finding from P7; pre-existing warnings recorded in BACKLOG (production advisor warnings)"
+ },
+ "reading": "P7 is live on production. Existing rows carry txid 0 and sit below every frontier a client stores from now on, so the first feed read from 0 pulls the root once; after that clients read the commit-ordered feeds. Old clients keep reading seq and id and see no change, except that a member can no longer hard-delete a live doc."
+}

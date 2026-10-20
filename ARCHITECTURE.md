@@ -316,13 +316,16 @@ TOFU-migrates only identities whose required private keys are local.
   poke→delta-pull→reconcile shape: realtime pokes wake an
   incremental `get_docs_delta(cursor)` pull; a **slow safety poll**
   (profile `idle_poll_s`, 45s on supabase) guards lost pokes; a full
-  reconcile runs at boot + every `reconcile_s` (24h since P7; it counts
+  reconcile runs at boot + every `reconcile_s` (24h since P7 while the
+  cursor is commit-ordered, 6h on a project without the feed RPCs; it counts
   **drift**: paths that differ although their last write sits below the
   mirror's cursor, shown in `mirror_status()["drift"]`; any drift restarts
   the zero-drift streak). P7 also keeps a **`caught_up`** set: a visible
   chat outside it (joined, or listed by this process's own append) gets one
   keyset read of `chats/<id>/` in the next delta tick, so its docs below
-  the cursor arrive at once; `CursorTooOld` means one full pull. The cursor's
+  the cursor arrive at once, and so does a chat whose meta `members`
+  changed (a remove-and-re-add between ticks); a failing chat retries
+  alone; a value the write guard skipped is read again next tick; `CursorTooOld` means one full pull. The cursor's
   basis, `caught_up` and the drift totals persist in the bootstrap
   snapshot; a snapshot without a basis costs one full pull. A **hint watchdog**
   drops to `fallback_poll_s` (10s) for 10 min when a safety poll finds
