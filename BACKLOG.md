@@ -34,11 +34,12 @@
   The August test-room items were not re-sent: r123 is fully tombstoned
   (its "created" event would revive it) and r127's two messages plus
   delete event were test scaffolding (see the next item).
-- [ ] **Leftover test room r127 in production**: its `chat_deleted` event
-  sat in the old outbox since 2026-08-08, so 7 live docs remain
+- [x] **Leftover test room r127 in production**: its `chat_deleted` event
+  sat in the old outbox since 2026-08-08, so 7 live docs remained
   (`chats/r127-live-1786185487344997000-g7f32264eaecc7e24/`: meta, key,
-  runtime events; no log rows). Not in Aryan's sidebar. Deleting it needs
-  Aryan's go-ahead (production data).
+  runtime events; no log rows; meta had no members). Purged 2026-10-20 on
+  Aryan's go-ahead the way `SupabaseTransport.delete_chat` does it: all 7
+  docs set `deleted=true, data={}` (r123's state).
 - [ ] **A retried log append can land twice** (found 2026-10-20 re-sending
   the stranded messages): `m-1791828234328246000-978c6c91` is in
   production `ab_logs` twice (rows 101364/101366, consecutive txids
@@ -51,15 +52,17 @@
   append idempotent (per-log uniqueness on the envelope id, with an
   identical existing row accepted as the lost-reply retry, as
   `create_doc` does) or never replay inserts inline. The duplicate row
-  stays unless Aryan wants it removed.
+  101366 was deleted 2026-10-20 on Aryan's go-ahead (guarded on 101364
+  holding the identical line); the delete-scope trigger moved the log
+  head back to 101364 and emitted the root visibility event.
 - [x] **Disk nearly full on this Mac** (found 2026-10-20 during the
   restart: 110 MB free of 228 GB; the shell failed with ENOSPC). Freed
   1.9 GB of this session's pytest temp folders and 1.5 GB of unused uv
   cache: 5.6 GB free. A full disk also leaked write intents (an outbox
   row's last error was `disk I/O error`). Aryan then freed ~50 GB (63 GB
-  free, 2026-10-20). The write-unblock backup (732 MB) is no longer
-  needed now that the messages are re-sent; it stays until Aryan says
-  to remove it.
+  free, 2026-10-20). The write-unblock backup (732 MB) was moved to the
+  macOS Trash on Aryan's go-ahead (permanent deletion is his to do:
+  emptying the Trash).
 - [ ] **Next round: resolve failed write intents instead of keeping them
   forever** (Aryan: "option 3 next round"): a write whose provider call
   failed re-reads its paths from the cloud and then clears its intent, so
