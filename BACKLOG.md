@@ -11,6 +11,49 @@
 
 ## Active, partial, and deferred requirements
 
+### Aryan's asks, 2026-10-20 (live test of v0.24.380)
+
+- [x] **Unblock this Mac's writes** (Aryan: "yes please, option 1"). Done
+  2026-10-20: stopped the app and agent worker; moved (not deleted) the
+  coordinator, the registered store (755 MB) and the registered node
+  replica to `~/.agentbridge/backups/write-unblock-20261020T101232Z`; restarted both. The new store rebuilt in ~14 s
+  (5.7 MB), both files pass `quick_check`, 0 pending intents, and this
+  machine's writes reach production again (presence, chat overlays and
+  machines rows at 10:12–10:17 UTC, stamped with txid). The old outbox's
+  8 rows never reached the cloud (checked by message id; a control id
+  was found): 4 from August test rooms (r123/r127) and 4 real messages
+  (Oct 12 18:03–18:05 UTC in three chats; today 09:40 UTC). They stay in
+  the backup; re-sending needs Aryan's yes.
+- [ ] **Disk nearly full on this Mac** (found 2026-10-20 during the
+  restart: 110 MB free of 228 GB; the shell failed with ENOSPC). Freed
+  1.9 GB of this session's pytest temp folders and 1.5 GB of unused uv
+  cache: 5.6 GB free. A full disk also leaked write intents (an outbox
+  row's last error was `disk I/O error`). Aryan to free space; the
+  write-unblock backup (732 MB) can go once he
+  has decided about the 4 unsent messages.
+- [ ] **Next round: resolve failed write intents instead of keeping them
+  forever** (Aryan: "option 3 next round"): a write whose provider call
+  failed re-reads its paths from the cloud and then clears its intent, so
+  no install ever reaches `pending_mutation_budget` again.
+- [ ] **Friendly error for a blocked write** (Aryan: "format the
+  'pending_mutation_budget' error toast properly, since the app is meant
+  for power and casual users alike, or handle it whatever way you feel
+  best"): plain words for casual users, the detail for power users
+  (diagnostics), and recovery where the app can do it itself.
+- [ ] **"Chat is not ready yet" screen still shows** (Aryan: "Astra was
+  unable to fully clear" it; "DO NOT REMOVE the screen itself yet, it
+  helps catch errors"; his reading: "the app does not serve cache while
+  the latest changes are fetched from cloud"). Serve the cached chat while
+  the fetch runs; keep the screen for real failures
+  (`gui/static/js/chat.js` "Chat is not ready yet."). Take up when
+  suitable.
+- [ ] **Change ledger decision** (Aryan is reviewing
+  docs/CHANGE_LEDGER_DISCUSSION.md; "so far I agree with your
+  recommendation"): wait for his final call; tell him if any work is
+  blocked on it.
+- [ ] **Architecture discussion after the above** (Aryan): agent
+  permissions, chat history on join, image preview loading.
+
 ### Typed-writer migration ledger (Claude Opus takeover, 2026-10-13/14)
 
 Rule (Aryan, 2026-10-14): every deferred task and decision lands here the
@@ -483,6 +526,24 @@ moment it is made, so a large task list never lives only in conversation.
 - [ ] **Hardening: `ab_docs_touch` search_path** (Scratch advisor,
   2026-10-14): the clean-install trigger function has a mutable search_path;
   pin it to `pg_catalog, public` in the schema.
+- [ ] **Local writes blocked: leaked mutation intents fill the budget**
+  (found live 2026-10-20 while starting v0.24.380 for Aryan's test; first
+  seen in launcher.log on 2026-10-13, before P7). Every local write
+  (`typing`, `delete_messages`, `clear_chat`, `archive`, `create_dm`)
+  fails with `SourceChanged('pending_mutation_budget')`:
+  `local_mutations._mutate` keeps a durable intent when the provider call
+  raises ("a later success cannot clear this older operation's ambiguous
+  outcome"), and `MutationCoordinator._insert_intent` refuses at
+  `MAX_PENDING = 64`. This Mac's coordinator
+  (`~/.agentbridge/local-input-owners/3d0f….sqlite`, last written
+  2026-10-13) holds 64 intents (2 quarantine sentinels; scopes: 61
+  `doc_exact`, 3 `log_chat`). So any 64 failed writes over an install's
+  life stop it writing for good. The only recovery tool, `quarantine`,
+  fences the affected paths forever. Needs: (1) a recovery decision for
+  this machine (Aryan's call: the registered store also holds 8 `outbox`
+  rows); (2) a design fix: an intent whose provider call failed must be
+  resolved, not kept forever, e.g. by re-reading the affected paths from
+  the provider (the cloud is the truth) and then clearing it.
 - [ ] **Hardening: production advisor warnings** (production security
   advisor after the P7 apply, 2026-10-20; none from P7): mutable
   search_path on `ab_chat_of`, `ab_list_logs`, `ab_docs_touch`,
