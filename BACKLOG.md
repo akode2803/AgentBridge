@@ -22,15 +22,44 @@
   machines rows at 10:12–10:17 UTC, stamped with txid). The old outbox's
   8 rows never reached the cloud (checked by message id; a control id
   was found): 4 from August test rooms (r123/r127) and 4 real messages
-  (Oct 12 18:03–18:05 UTC in three chats; today 09:40 UTC). They stay in
-  the backup; re-sending needs Aryan's yes.
-- [ ] **Disk nearly full on this Mac** (found 2026-10-20 during the
+  (Oct 12 18:03–18:05 UTC in three chats; today 09:40 UTC).
+- [x] **Re-send the 4 stranded messages** (Aryan: "lets resend all the
+  unsent messages"). Done 2026-10-20 13:10 UTC: the original signed
+  envelopes (ids and timestamps unchanged) were re-queued into the live
+  store with the app's own `Store.cache_and_outbox_add`, after re-checking
+  that none was in the cloud or the live store; the app sent all 4 on its
+  first outbox pass (rows 101364–101372). Their chats had nothing newer
+  than Oct 8, so they land as each chat's latest messages. The app and
+  agent worker had been closed during the disk cleanup; both restarted.
+  The August test-room items were not re-sent: r123 is fully tombstoned
+  (its "created" event would revive it) and r127's two messages plus
+  delete event were test scaffolding (see the next item).
+- [ ] **Leftover test room r127 in production**: its `chat_deleted` event
+  sat in the old outbox since 2026-08-08, so 7 live docs remain
+  (`chats/r127-live-1786185487344997000-g7f32264eaecc7e24/`: meta, key,
+  runtime events; no log rows). Not in Aryan's sidebar. Deleting it needs
+  Aryan's go-ahead (production data).
+- [ ] **A retried log append can land twice** (found 2026-10-20 re-sending
+  the stranded messages): `m-1791828234328246000-978c6c91` is in
+  production `ab_logs` twice (rows 101364/101366, consecutive txids
+  415198/415199, byte-identical) from ONE outbox attempt that took 936 ms
+  (the other three took ~250 ms). `SupabaseTransport.append_log` is a
+  plain insert and `_retry` replays it after an inline-retryable error
+  (`offline`/`service_error`, 0.4 s wait), so an insert that committed
+  but lost its reply is written again. Readers dedupe by `(chat_id, id)`
+  (the app showed it once), so nothing visible broke. Fix: make the
+  append idempotent (per-log uniqueness on the envelope id, with an
+  identical existing row accepted as the lost-reply retry, as
+  `create_doc` does) or never replay inserts inline. The duplicate row
+  stays unless Aryan wants it removed.
+- [x] **Disk nearly full on this Mac** (found 2026-10-20 during the
   restart: 110 MB free of 228 GB; the shell failed with ENOSPC). Freed
   1.9 GB of this session's pytest temp folders and 1.5 GB of unused uv
   cache: 5.6 GB free. A full disk also leaked write intents (an outbox
-  row's last error was `disk I/O error`). Aryan to free space; the
-  write-unblock backup (732 MB) can go once he
-  has decided about the 4 unsent messages.
+  row's last error was `disk I/O error`). Aryan then freed ~50 GB (63 GB
+  free, 2026-10-20). The write-unblock backup (732 MB) is no longer
+  needed now that the messages are re-sent; it stays until Aryan says
+  to remove it.
 - [ ] **Next round: resolve failed write intents instead of keeping them
   forever** (Aryan: "option 3 next round"): a write whose provider call
   failed re-reads its paths from the cloud and then clears its intent, so
