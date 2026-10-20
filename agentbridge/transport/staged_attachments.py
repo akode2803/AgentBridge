@@ -109,6 +109,19 @@ class StagedAttachmentPublisher:
             raise ValidationError("staged attachment size is unavailable")
         return object_id, int(size)
 
+    def remove(self, relative_paths: list[str]) -> None:
+        """Remove objects as the bound writer's principal, 100 keys a call.
+
+        Receipt-free and idempotent: Storage is outside the seal and a missing
+        object is already the goal. Storage answers an RLS-filtered delete
+        with an empty success, so callers that must know (the janitor before
+        a purge) list the folder again.
+        """
+        self._prepare_storage()
+        keys = [f"{self.writer.root}/{path}" for path in relative_paths]
+        for at in range(0, len(keys), 100):
+            self._call(lambda chunk=keys[at:at + 100]: self.bucket.remove(chunk))
+
     def _identity(self, chat_id: str, manifest: dict):
         from ..mesh.attachments import attachment_path
 

@@ -149,12 +149,12 @@ cache.
 | Service | Responsibility |
 |---|---|
 | `MessagingService` | every mutating message op + the read choke-point `messages_for`; each public method gates via `_require_member` before touching anything (write gates too, not just reads) |
-| `MembershipService` | chats/DMs/self-chats, the multi-admin model, create/add/remove/leave/rename/permissions/delete — emits signed info events then refolds; `authz` gate before every mutation |
+| `MembershipService` | chats/DMs/self-chats, the multi-admin model, create/add/remove/leave/rename/permissions/delete — emits signed info events then refolds; `authz` gate before every mutation. Under a bound typed writer (inactive) each action is instead one provider meta append: the `meta.json` swap and its signed events in one transaction (docs/PROVIDER_ADMISSION_CHECKPOINT.md) |
 | `AccountsService` | account lifecycle (scrypt auth for humans; agents never authenticate — machine identity), profile/status, agent create/adopt/delete; creation persists the private bundle + TOFU pin before publishing the account row and rolls both back if publication fails; all agent edits owner-gated via `_writable_target` |
 | `PrivacyService` | the R6 matrix (who may see/reach whom), blocks, agent outbound rules; `visible_profile` is the projection every connector serves instead of raw account docs. On top of it the GUI's `user_json` keeps an agent's harness config (`settings` — model, routing, standing approvals, aux flags) owner-only (R49); `owners` stays public — the responsible member is accountability, not config |
 | `PresenceService` / `ReceiptsService` | online/last-seen heartbeat + the Sent/Delivered/Read ladder from per-member cursors: Read = `read_ns`, Delivered = the R33 `delivered_ns` fetch cursor (presence as the floor); `message_info` carries per-member Delivered/Read timestamps |
 | `Notifier` / `EventBus` | in-process pub/sub feeding the GUI SSE + the CLI long-poll; `consider()` is the one ping decision (membership, not-from-me, mute, read-state — mute + `read_ns` from ONE verified state read, R42) reused by the SSE `notify` lane and the CLI `watch` sinks |
-| `SyncEngine` | pulls new records per chat by byte-offset, in parallel, **never reading logs of chats this identity isn't in**; drops any record whose `from` ≠ the log's owner (ingestion sanity). On a change-feed transport (R30) a tick is ONE "what changed since cursor?" query (cursor persisted in the store; a newly-joined chat gets one full scan since its history may sit below the cursor). In the run loop, each post-watcher scan reports whether message logs changed with or without a hint to the transport wrapper, so metered transports can shorten degraded-realtime polls when log pokes are being lost. A failing pass never kills the loop (next tick heals). |
+| `SyncEngine` | pulls new records per chat by byte-offset, in parallel, **never reading logs of chats this identity isn't in**; drops any record whose `from` ≠ the log's owner (ingestion sanity). On a change-feed transport (R30) a tick is ONE "what changed since cursor?" query (cursor persisted in the store; a newly-joined chat gets one full scan since its history may sit below the cursor; P7: the cursor is stored with its `basis`, and `CursorTooOld` — a pre-P7 counter, or a restored server — means scanning every member chat by its heads, then going on from the exception's `restart` frontier). In the run loop, each post-watcher scan reports whether message logs changed with or without a hint to the transport wrapper, so metered transports can shorten degraded-realtime polls when log pokes are being lost. A failing pass never kills the loop (next tick heals). |
 
 `harden_startup()` (R25, called by connectors on sign-in) is an idempotent
 migration: it refolds pre-R25 chats to populate `tenure` and re-signs any
@@ -280,7 +280,16 @@ TOFU-migrates only identities whose required private keys are local.
   `create_doc` (plain INSERT), not the normal `put_doc` UPSERT: an absent-row
   UPSERT still evaluates UPDATE RLS before the meta can establish membership.
   Identical duplicate creates are idempotent; conflicting duplicates remain
-  denied by the unique key. PostgREST calls use a 6s request deadline instead
+  denied by the unique key. Log appends land once: the retry of an INSERT
+  whose reply was lost used to write a byte-identical second row (readers
+  dedupe by id). The `ab_omit_landed_line` BEFORE INSERT trigger
+  (caller's rights, behind the same ledger-then-log locks as
+  `ab_order_log_id`) silently skips a line already in its log, so old and
+  new clients alike see the retry succeed; the `ab_logs_line_once` unique
+  index (root, chat, log, `md5(line)`) serves that lookup and backs it,
+  and `append_log` accepts its 23505 only after reading the identical
+  line back.
+  PostgREST calls use a 6s request deadline instead
   of the library's 120s default; storage retains a 20s deadline. Fast paths:
   `get_docs` (one paged query), `changed_logs` (`ab_logs` ids are one
   global identity column), and the R76 **doc delta feed** —
@@ -289,7 +298,19 @@ TOFU-migrates only identities whose required private keys are local.
   30 days; `put_doc` revives). The driver PROBES for the migrated schema
   and falls back to legacy full snapshots until the `docs/supabase_schema.sql`
   R76 section is pasted — re-probing on a 60s leash, so the paste upgrades a
-  live fleet with no restart. Writes are echo-free (`returning="minimal"`);
+  live fleet with no restart. **P7 commit-ordered feeds**
+  (docs/COMMIT_ORDERED_CURSORS.md): with `ab_feeds_frontier`/`ab_docs_feed`/
+  `ab_logs_feed` live (probed the same way), the doc delta and
+  `changed_logs` serve only rows below the frontier (the oldest transaction
+  still running), so a cursor never passes a late commit; their cursors are
+  `FeedCursor(position, basis="frontier:<epoch>")` (`transport/base.py`),
+  and a plain-int cursor, a purge floor above it, a rewound server or a new
+  epoch raises `CursorTooOld` (with a `restart` cursor for the log feed).
+  Ids within one log follow commit order (the `ab_order_log_id` trigger), so
+  `read_log` offsets stay plain ints. Full and prefix pulls page by key
+  (`path > last`) until an empty page; the full pull includes tombstones so
+  each path's write position rides on the cursor (`row_positions`) for drift
+  counting. Writes are echo-free (`returning="minimal"`);
   outbound **hints are class-coalesced with a trailing edge**
   (`_HintCoalescer`): messages 0.5s, permission asks 1s, run-feed 5s,
   read-state 10s, `presence/` NEVER (heartbeats are carried by safety
@@ -304,7 +325,18 @@ TOFU-migrates only identities whose required private keys are local.
   poke→delta-pull→reconcile shape: realtime pokes wake an
   incremental `get_docs_delta(cursor)` pull; a **slow safety poll**
   (profile `idle_poll_s`, 45s on supabase) guards lost pokes; a full
-  reconcile runs at boot + every `reconcile_s` (6h); a **hint watchdog**
+  reconcile runs at boot + every `reconcile_s` (24h since P7 while the
+  cursor is commit-ordered, 6h on a project without the feed RPCs; it counts
+  **drift**: paths that differ although their last write sits below the
+  mirror's cursor, shown in `mirror_status()["drift"]`; any drift restarts
+  the zero-drift streak). P7 also keeps a **`caught_up`** set: a visible
+  chat outside it (joined, or listed by this process's own append) gets one
+  keyset read of `chats/<id>/` in the next delta tick, so its docs below
+  the cursor arrive at once, and so does a chat whose meta `members`
+  changed (a remove-and-re-add between ticks); a failing chat retries
+  alone; a value the write guard skipped is read again next tick; `CursorTooOld` means one full pull. The cursor's
+  basis, `caught_up` and the drift totals persist in the bootstrap
+  snapshot; a snapshot without a basis costs one full pull. A **hint watchdog**
   drops to `fallback_poll_s` (10s) for 10 min when a safety poll finds
   doc changes no poke announced, and the same suspect window now also listens
   to unhinted message-log discoveries from `SyncEngine`. Pre-migration
@@ -555,23 +587,34 @@ live only in an adapter preset.
   append but before local acknowledgement; stable ids make the read projection
   exactly once. True remote exactly-once append would require a format/schema
   migration and is not claimed.
-- **Terminal-chat blob reclamation** (R119) — terminal outbox dispatch appends
-  the signed deletion event, proves terminal state by folding authenticated
-  info events, reclaims exact owned attachments while the pre-terminal member
-  ACL still authorizes Storage, and only then materializes empty-members meta.
-  A failed exact delete therefore preserves both authorization and the durable
-  retry row. Ownership comes from decryptable sender-signed envelopes whose
-  timestamps fall inside folded sender tenure; the complete remote scan is
-  merged with already-ingested signed local envelopes to tolerate immediate
-  provider read lag. Stable blob ids pass the shared attachment validator and
-  deduplicate to exact paths. The later janitor repeats the proof before
-  relational retention cleanup. Supabase requires confirmation of each exact
-  full deletion key and never lists/removes a chat Storage prefix; the cache
-  wrapper explicitly delegates exact deletes. Folder record deletion likewise
-  leaves unproven files/avatar artifacts inert, and record-backed discovery
-  does not resurrect such an artifact-only directory as a chat. Supabase's
-  deletion-only existence check propagates provider failures, unlike tolerant
-  read-side size probes, so an outage cannot masquerade as an absent object.
+- **Terminal-chat blob reclamation** (R119, reshaped 2026-10-14 by D-018) —
+  a delete-for-everyone folds `final_members` (the members at deletion)
+  before emptying `members`; only they (older deletions: the tenure) read the
+  deleted room, see and delete its Storage objects and purge it
+  (`ab_can_read_chat`, `ab_chat_terminal_reader`). Legacy terminal outbox
+  dispatch reclaims after appending the signed deletion event; the typed
+  path reclaims right after its `meta_append` swap (a failure only logs).
+  Both call `Janitor.reclaim_deleted_chat_attachments`, which requires a
+  fold-verified deletion and then deletes every object under the chat's own
+  folders. `chats/<chat>`, `chats/<chat>/files` and `blob-stage/<chat>` are
+  each listed by name, page by page (Storage returns 100 names per call),
+  recursing into any other sub-folder Storage reports. The exact
+  message-referenced paths of the removed folder transport are gone: a chat
+  owns its folders, and listing also reclaims files no message references.
+  Deletes go out as `delete_blobs`, 100 exact keys a Storage call with no
+  per-object lookup or confirmation (an RLS-filtered key is silently kept):
+  the janitor purges the records only after the grace window, only once a
+  fresh listing is empty and, when bound, only once the provider meta is
+  terminal, and a transport that cannot list never purges. Bound, the purge
+  is a `chat_delete` under a fresh key, and each sweep first settles one
+  whose reply was lost (its unacknowledged receipt would otherwise hold
+  every epoch rotation). Bound blob deletes are direct, identity-checked
+  Storage removes limited to paths inside a chat's own folders (Storage
+  sits outside the seal; RLS decides). `doc_delete` never tombstones a chat
+  meta, so only `chat_delete` ends a room and a purge always takes its logs.
+  The single `delete_blob` keeps its exact lookup (a 0-byte object counts as
+  present) and exact-key confirmation, and propagates provider failures, so
+  an outage cannot masquerade as an absent object.
 - **`broker.py`** (R18) — the Codex/Claude-Code-style PermissionBroker. Decision
   order: workspace path → allow; deny-root (harness home, mesh root) → refuse
   always; preset `auto_allow` (read-only tools) → allow; owner standing rule →

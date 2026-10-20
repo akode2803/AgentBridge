@@ -323,7 +323,7 @@ class UserStateActionQueue:
             _fail('owner_changed')
         self.driver._check_owner()
         journal._check(conn)
-        if conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() not in {(6,), (7,), (8,)}:
+        if conn.execute('SELECT format FROM mutation_root WHERE singleton=1').fetchone() not in {(6,), (7,), (8,), (9,)}:
             _fail('lifecycle_required')
 
     def enqueue(self, chat: str, user: str, kind: str, args: dict) -> str:

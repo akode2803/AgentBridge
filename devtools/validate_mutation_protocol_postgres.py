@@ -103,6 +103,8 @@ create table public.ab_members (
   root text not null,
   username text not null,
   uid uuid not null,
+  added_at timestamptz not null default now(),
+  revoked_at timestamptz,
   primary key (root, username),
   unique (root, uid)
 );
@@ -161,14 +163,14 @@ create or replace function public.ab_member(p_root text) returns text
 language sql stable security definer set search_path = pg_catalog as $$
   select coalesce((
     select m.username from public.ab_members m
-    where m.root = p_root and m.uid = auth.uid()
+    where m.root = p_root and m.uid = auth.uid() and m.revoked_at is null
   ), '')
 $$;
 create or replace function public.ab_root_ok(p_root text) returns boolean
 language sql stable security definer set search_path = pg_catalog as $$
   select exists (
     select 1 from public.ab_members m
-    where m.root = p_root and m.uid = auth.uid()
+    where m.root = p_root and m.uid = auth.uid() and m.revoked_at is null
   )
 $$;
 revoke all on function public.ab_root_ok(text) from public;
@@ -200,10 +202,21 @@ language sql stable security definer set search_path = pg_catalog as $$
         m.data->'members' ? public.ab_member(p_root)
         or (
           m.data @> '{"deleted": true}'::jsonb
-          and m.data->'tenure' ? public.ab_member(p_root)
+          and case
+            when m.data ? 'final_members'
+            then pg_catalog.jsonb_typeof(m.data->'final_members') = 'array'
+                 and m.data->'final_members' ? public.ab_member(p_root)
+            else m.data->'tenure' ? public.ab_member(p_root)
+          end
         )
       )
   )
+$$;
+create or replace function public.ab_chat_terminal_reader(p_root text, p_chat text)
+returns boolean
+language sql stable security definer set search_path = pg_catalog as $$
+  select public.ab_can_read_chat(p_root, p_chat)
+    and not public.ab_is_member(p_root, p_chat)
 $$;
 """
 
@@ -907,7 +920,7 @@ def _validate_p1b_core(database_url: str) -> None:
             root, epoch, leave_id, "member_leave",
             leave_client, leave_provider,
         )
-        + "; delete from public.ab_members where root = "
+        + "; update public.ab_members set revoked_at = now() where root = "
         f"{_quote(root)} and uid = {_quote(str(actor))}::uuid; "
         + _finish_sql(
             root, epoch, leave_id, "member_leave",
@@ -1481,10 +1494,18 @@ def _validate_p1b_lifecycle_rpcs(database_url: str) -> None:
         f"({_quote(root)}, 'chats/terminal-null-tenure/meta.json', "
         "pg_catalog.jsonb_build_object("
         "'deleted', true, 'members', '{}'::jsonb, 'tenure', null), false); "
+        # Distinct lines: one log holds a line once (ab_logs_line_once).
         "insert into public.ab_logs(root,chat_id,log_name,line) values "
-        f"({_quote(root)}, {_quote(chat)}, 'writer', '{{}}'), "
-        f"({_quote(root)}, {_quote(chat)}, 'writer', '{{}}'), "
+        f"({_quote(root)}, {_quote(chat)}, 'writer', '{{\"n\":1}}'), "
+        f"({_quote(root)}, {_quote(chat)}, 'writer', '{{\"n\":2}}'), "
         f"({_quote(root)}, {_quote(sibling)}, 'writer', '{{}}');",
+    )
+    # An agent's account doc: its name has no login, and none may claim it.
+    _run(
+        database_url,
+        "insert into public.ab_docs(root,path,data) values ("
+        f"{_quote(root)}, 'users/typed-agent.json', "
+        "'{\"kind\":\"agent\"}'::jsonb);",
     )
     sealed = json.loads(_scalar(
         database_url, _seal_sql(root, before, uuid4())))
@@ -1548,6 +1569,25 @@ def _validate_p1b_lifecycle_rpcs(database_url: str) -> None:
         f"{_quote(str(duplicate_id))}::uuid;",
     )):
         raise GateFailure("conflicting member claim retained a receipt")
+    agent_claim_id = uuid4()
+    agent_claim = _run(
+        database_url,
+        "begin; set local role authenticated; " + _claims(uuid4())
+        + "select public.ab_mutation_member_claim("
+        f"{_quote(root)}, {_quote(str(epoch))}::uuid, "
+        f"{_quote(str(agent_claim_id))}::uuid, {_quote('9' * 64)}, "
+        "'typed-agent'); commit;",
+        expect_ok=False,
+    )
+    if "name belongs to an existing account" not in agent_claim.stderr:
+        raise GateFailure("typed claim took an existing account's name")
+    if int(_scalar(
+        database_url,
+        "select count(*) from public.ab_mutation_receipts where root = "
+        f"{_quote(root)} and operation_id = "
+        f"{_quote(str(agent_claim_id))}::uuid;",
+    )):
+        raise GateFailure("refused account-name claim retained a receipt")
 
     leave_id = uuid4()
     leave_digest = "7" * 64
@@ -1569,12 +1609,13 @@ def _validate_p1b_lifecycle_rpcs(database_url: str) -> None:
     if leave_receipt != leave_replay or leave_receipt["result"] != {
             "left": True, "username": "typed-new-member"}:
         raise GateFailure("member leave did not replay after membership loss")
-    if int(_scalar(
+    if _scalar(
         database_url,
-        "select count(*) from public.ab_members where root = "
+        "select count(*)::text || ':' || count(revoked_at)::text "
+        "from public.ab_members where root = "
         f"{_quote(root)} and uid = {_quote(str(claimant))}::uuid;",
-    )):
-        raise GateFailure("typed member leave did not remove exact self row")
+    ) != "1:1":
+        raise GateFailure("typed member leave did not revoke exact self row")
     second_leave_id = uuid4()
     second_leave = _run(
         database_url,
@@ -2680,6 +2721,287 @@ def _validate_conditional_documents(database_url: str) -> None:
         raise GateFailure('conditional fresh write ignored membership removal')
 
 
+def _validate_meta_append(database_url: str) -> None:
+    """A membership swap and its events commit together, under pre-swap authority."""
+    root, actor, chat = 'typed-meta-append', uuid4(), 'room'
+    member, log = root + '-member', root + '-member|m1'
+    meta_path = f'chats/{chat}/meta.json'
+    initial = _prepare_root(database_url, root, actor)
+    stranger = uuid4()  # a root member who was never in the chat
+    _run(database_url, 'insert into public.ab_members(root, username, uid) values ('
+         f'{_quote(root)}, {_quote(root + "-stranger")}, {_quote(str(stranger))});')
+    _run(database_url, 'insert into public.ab_docs(root,path,data) values ('
+         f'{_quote(root)}, {_quote(meta_path)}, '
+         f'{_jsonb({"members": {member: {}, "peer": {}}})});')
+    sealed = json.loads(_scalar(database_url, _seal_sql(root, initial, uuid4())))
+    epoch, source = UUID(sealed['protocol_epoch']), UUID(sealed['source_epoch'])
+
+    def record(n):
+        return {'id': f'e{n}', 'ns': n, 'kind': 'info', 'event': {'type': 'member_left'}}
+
+    def call(seq, members, records, *, operation=None, source_epoch=source,
+             deleted=False, extra=None):
+        return ('select public.ab_mutation_meta_append('
+                f'{_quote(root)}, {_quote(str(epoch))}::uuid, '
+                f'{_quote(str(operation or uuid4()))}::uuid, {_quote("d" * 64)}, '
+                f'{_quote(chat)}, {_jsonb({"members": members, **(extra or {})})}, '
+                f'{_quote(str(source_epoch))}::uuid, {seq}, '
+                f'{"true" if deleted else "false"}, {_quote(log)}, '
+                f'{_quote(json.dumps(records))}::jsonb)')
+
+    def run(sql, uid=actor):
+        return json.loads(_scalar(database_url, 'begin; set local role authenticated; '
+                                 + _claims(uid) + sql + '; commit;'))
+
+    def refused(sql, uid=actor):
+        return _run(database_url, 'begin; set local role authenticated; '
+                    + _claims(uid) + sql + '; commit;', expect_ok=False).stderr
+
+    def state():
+        return json.loads(_scalar(database_url,
+            "select jsonb_build_object('seq', d.seq, 'data', d.data, 'lines', "
+            "coalesce((select jsonb_agg(l.line::jsonb order by l.id) from public.ab_logs l "
+            f"where l.root={_quote(root)} and l.chat_id={_quote(chat)}), '[]'::jsonb)) "
+            f"from public.ab_docs d where d.root={_quote(root)} and d.path={_quote(meta_path)};"))
+
+    start = state()
+    seq = start['seq']
+    for bad in (call(0, {}, [record(1)]), call(seq, {}, []),
+                call(seq, {}, [record(1)], deleted=True),
+                call(seq, {}, [record(1), 'not-an-object']),
+                call(seq, {}, [record(n) for n in range(257)])):
+        if 'invalid meta append' not in refused(bad) or state() != start:
+            raise GateFailure('meta append accepted an invalid request')
+    # A stale version or source epoch changes nothing and replays exactly.
+    stale = call(seq + 1, {}, [record(1)])
+    stale_receipt = run(stale)
+    if (stale_receipt['result'] != {'chat_id': chat, 'log_name': log, 'applied': False}
+            or run(stale) != stale_receipt or state() != start):
+        raise GateFailure('stale meta append wrote or did not replay')
+    if run(call(seq, {}, [record(1)], source_epoch=uuid4()))['result']['applied'] \
+            or state() != start:
+        raise GateFailure('meta append crossed the observed source epoch')
+    # An aborted transaction leaves neither half nor a receipt.
+    aborted = call(seq, {'peer': {}}, [record(1)])
+    _run(database_url, 'begin; set local role authenticated; ' + _claims(actor)
+         + aborted + '; rollback;')
+    if state() != start:
+        raise GateFailure('aborted meta append leaked a write')
+    # A root member who was never in the chat gets no answer, even for a
+    # version that moved on.
+    if 'meta append is unauthorized' not in refused(call(seq + 1, {}, [record(1)]),
+                                                    uid=stranger):
+        raise GateFailure('meta append answered a principal outside the chat')
+    # The member leaves: meta and both records land together, in order. The
+    # fold keeps the leaver in tenure.
+    operation = uuid4()
+    tenure = {member: [[1, 3]], 'peer': [[1]]}
+    leave = call(seq, {'peer': {}}, [record(2), record(3)], operation=operation,
+                 extra={'tenure': tenure})
+    receipt = run(leave)
+    after = state()
+    if (receipt['result'] != {'chat_id': chat, 'log_name': log, 'applied': True}
+            or after['data'] != {'members': {'peer': {}}, 'tenure': tenure}
+            or after['seq'] == seq or after['lines'] != [record(2), record(3)]):
+        raise GateFailure('meta append did not swap and append atomically')
+    collision = refused(call(seq, {'peer': {}}, [record(2)], operation=operation))
+    if 'collides with existing receipt' not in collision:
+        raise GateFailure('meta append digest omitted its records')
+    # Replay precedes authority: the former member recovers the exact receipt
+    # without a second append.
+    if run(leave) != receipt or run(stale) != stale_receipt or state() != after:
+        raise GateFailure('meta append replay required membership or re-appended')
+    # A former member gets the same applied=false at the current version as
+    # at the one they last saw, so the answer reveals nothing about the chat
+    # since they left, and swaps nothing. An attempt that lost a race to the
+    # leaver's own departure therefore settles too.
+    unchanged = {'chat_id': chat, 'log_name': log, 'applied': False}
+    for version, n in ((after['seq'], 4), (seq, 5)):
+        if (run(call(version, {'peer': {}, member: {}}, [record(n)]))['result'] != unchanged
+                or state() != after):
+            raise GateFailure('a former member swapped the meta or learned its version')
+    if 'meta append is unauthorized' not in refused(
+            call(after['seq'], {'peer': {}}, [record(6)]), uid=stranger):
+        raise GateFailure('meta append answered a principal outside the chat')
+
+    # A concurrent swap holding the exclusive chat lock: the waiting append
+    # rechecks the version after the holder commits and appends nothing.
+    root2, actor2 = 'typed-meta-append-race', uuid4()
+    member2 = root2 + '-member'
+    initial2 = _prepare_root(database_url, root2, actor2)
+    _run(database_url, 'insert into public.ab_docs(root,path,data) values ('
+         f'{_quote(root2)}, {_quote(meta_path)}, {_jsonb({"members": {member2: {}}})});')
+    sealed2 = json.loads(_scalar(database_url, _seal_sql(root2, initial2, uuid4())))
+    epoch2, source2 = UUID(sealed2['protocol_epoch']), UUID(sealed2['source_epoch'])
+    seq2 = int(_scalar(database_url, 'select seq from public.ab_docs where root='
+                       f'{_quote(root2)} and path={_quote(meta_path)};'))
+    holder_sql = ('select public.ab_mutation_doc_compare_put('
+                  f'{_quote(root2)}, {_quote(str(epoch2))}::uuid, '
+                  f'{_quote(str(uuid4()))}::uuid, {_quote("a" * 64)}, {_quote(meta_path)}, '
+                  f'{_jsonb({"members": {member2: {}, "late": {}}})}, '
+                  f'{_quote(str(source2))}::uuid, {seq2}, false)')
+    waiter_sql = ('select public.ab_mutation_meta_append('
+                  f'{_quote(root2)}, {_quote(str(epoch2))}::uuid, '
+                  f'{_quote(str(uuid4()))}::uuid, {_quote("b" * 64)}, {_quote(chat)}, '
+                  f'{_jsonb({"members": {}})}, {_quote(str(source2))}::uuid, {seq2}, false, '
+                  f'{_quote(member2 + "|m1")}, {_quote(json.dumps([record(9)]))}::jsonb)')
+    suffix = uuid4().hex[:10]
+    holder_name, waiter_name = 'meta-holder-' + suffix, 'meta-waiter-' + suffix
+    ready, done = 'meta-ready-' + suffix, 'meta-done-' + suffix
+    holder, waiter = _PsqlSession(database_url), _PsqlSession(database_url)
+    try:
+        holder.send(f'set application_name={_quote(holder_name)}; begin; '
+                    'set local role authenticated; ' + _claims(actor2)
+                    + holder_sql + f'; select {_quote(ready)};')
+        holder.wait_marker(ready)
+        waiter.send(f'set application_name={_quote(waiter_name)}; begin; '
+                    'set local role authenticated; ' + _claims(actor2)
+                    + waiter_sql + f'; commit; select {_quote(done)};')
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            blocked = _scalar(database_url,
+                'select exists(select 1 from pg_catalog.pg_stat_activity h '
+                'join pg_catalog.pg_stat_activity w on '
+                'h.pid = any(pg_catalog.pg_blocking_pids(w.pid)) '
+                f'where h.application_name={_quote(holder_name)} '
+                f'and w.application_name={_quote(waiter_name)});')
+            if blocked == 't':
+                break
+            time.sleep(0.025)
+        else:
+            raise GateFailure('meta append did not wait for a concurrent meta swap')
+        holder.send('commit;')
+        waiter.wait_marker(done)
+        holder.finish()
+        waiter.finish()
+    finally:
+        holder.abort()
+        waiter.abort()
+    lines = _scalar(database_url, 'select count(*) from public.ab_logs where root='
+                    f'{_quote(root2)};')
+    members = _scalar(database_url, "select data->'members' ? 'late' from public.ab_docs "
+                      f'where root={_quote(root2)} and path={_quote(meta_path)};')
+    if lines != '0' or members != 't':
+        raise GateFailure('meta append overwrote a concurrent swap or appended anyway')
+
+
+def _validate_terminal_readers(database_url: str) -> None:
+    """Only a deleted room's final members read, clean up and purge it; once
+    purged, every root member gets the same empty answers (D-017, D-018)."""
+    root = 'typed-terminal-readers'
+    final, uploader, departed, outsider = uuid4(), uuid4(), uuid4(), uuid4()
+    names = {final: root + '-member', uploader: root + '-uploader',
+             departed: root + '-departed', outsider: root + '-outsider'}
+    before = _prepare_root(database_url, root, final)
+    dead = {'deleted': True, 'members': {},
+            'tenure': {names[final]: [[1, 4]], names[uploader]: [[1, 4]],
+                       names[departed]: [[1, 2]]},
+            'final_members': sorted((names[final], names[uploader]))}
+    legacy = {'deleted': True, 'members': {},
+              'tenure': {names[final]: [[1, 4]], names[departed]: [[1, 2]]}}
+    live = {'members': {names[final]: {}, names[uploader]: {}}}
+    staged, legacy_file, live_staged = (
+        f'{root}/blob-stage/room/f2-x', f'{root}/chats/room/files/f-1',
+        f'{root}/blob-stage/live/f2-y')
+    _run(database_url,
+         'insert into public.ab_members(root,username,uid) values '
+         + ', '.join(f'({_quote(root)}, {_quote(names[uid])}, {_quote(str(uid))})'
+                     for uid in (uploader, departed, outsider)) + '; '
+         'insert into public.ab_docs(root,path,data) values '
+         f"({_quote(root)}, 'chats/room/meta.json', {_jsonb(dead)}), "
+         f"({_quote(root)}, 'chats/room/note.json', '{{}}'::jsonb), "
+         f"({_quote(root)}, 'chats/legacy/meta.json', {_jsonb(legacy)}), "
+         f"({_quote(root)}, 'chats/live/meta.json', {_jsonb(live)}); "
+         'insert into public.ab_logs(root,chat_id,log_name,line) values '
+         f"({_quote(root)}, 'room', 'writer', '{{}}'); "
+         'insert into storage.objects(bucket_id,name,owner_id,metadata) values '
+         + ', '.join(f"('ab-mesh', {_quote(name)}, {_quote(str(uploader))}, "
+                     "'{\"size\":1}'::jsonb)"
+                     for name in (staged, legacy_file, live_staged)) + ';')
+
+    def as_(uid, sql):
+        return _scalar(database_url, 'begin; set local role authenticated; '
+                       + _claims(uid) + sql + '; commit;')
+
+    def reads(uid, chat):
+        return as_(uid, f"select public.ab_can_read_chat({_quote(root)}, {_quote(chat)})")
+
+    def sees(uid, name):
+        return as_(uid, "select count(*) from storage.objects where bucket_id='ab-mesh' "
+                        f"and name={_quote(name)}")
+
+    if [reads(uid, 'room') for uid in (final, uploader, departed, outsider)] \
+            != ['t', 't', 'f', 'f']:
+        raise GateFailure('a deleted room is readable beyond its final members')
+    if reads(departed, 'legacy') != 't' or reads(outsider, 'legacy') != 'f':
+        raise GateFailure('a deletion without final members lost its tenure fallback')
+    # The final members (not only the uploader) see and remove the dead room's
+    # staged objects; a departed member cannot; a live room stays owner-only.
+    if sees(final, staged) != '1' or sees(departed, staged) != '0':
+        raise GateFailure('staged objects of a deleted room are not final-members-only')
+    # The delete policy alone (a real DELETE also needs SELECT visibility,
+    # which would hide a too-wide delete rule behind the read rule).
+    qual = _scalar(database_url, "select qual from pg_policies where schemaname='storage' "
+                   "and tablename='objects' and policyname='ab_blobs_member_delete'")
+
+    def deletable(uid, name):
+        return _scalar(database_url, 'begin; ' + _claims(uid)
+                       + "select count(*) from storage.objects where bucket_id='ab-mesh' "
+                       f'and name={_quote(name)} and ({qual}); commit;')
+
+    if [deletable(uid, name) for uid, name in (
+            (departed, staged), (departed, legacy_file), (outsider, staged),
+            (final, live_staged), (uploader, live_staged))] != ['0', '0', '0', '0', '1']:
+        raise GateFailure('the delete policy reaches beyond owners and final members')
+    for name in (staged, legacy_file):
+        if as_(final, 'with gone as (delete from storage.objects where '
+                      f"bucket_id='ab-mesh' and name={_quote(name)} returning 1) "
+                      'select count(*) from gone') != '1':
+            raise GateFailure('a final member could not clear a deleted room object')
+
+    sealed = json.loads(_scalar(database_url, _seal_sql(root, before, uuid4())))
+    epoch, source = UUID(sealed['protocol_epoch']), UUID(sealed['source_epoch'])
+
+    def purge(uid, *, ok=True):
+        sql = ('select public.ab_mutation_chat_delete('
+               f'{_quote(root)}, {_quote(str(epoch))}::uuid, '
+               f"{_quote(str(uuid4()))}::uuid, {_quote('c' * 64)}, 'room')")
+        if not ok:
+            return _run(database_url, 'begin; set local role authenticated; '
+                        + _claims(uid) + sql + '; commit;', expect_ok=False).stderr
+        return json.loads(as_(uid, sql))['result']
+
+    meta_delete = ('select public.ab_mutation_doc_delete('
+                   f'{_quote(root)}, {_quote(str(epoch))}::uuid, '
+                   f"{_quote(str(uuid4()))}::uuid, {_quote('e' * 64)}, "
+                   "'chats/room/meta.json')")
+    if 'typed document delete is unauthorized' not in _run(
+            database_url, 'begin; set local role authenticated; ' + _claims(final)
+            + meta_delete + '; commit;', expect_ok=False).stderr:
+        raise GateFailure('a chat meta was tombstoned outside chat_delete')
+    if 'typed chat delete is unauthorized' not in purge(departed, ok=False):
+        raise GateFailure('a member who left before the deletion purged the room')
+    if purge(final) != {'chat_id': 'room', 'logs_deleted': 1, 'documents_tombstoned': 2}:
+        raise GateFailure('a final member could not purge the deleted room')
+    empty = {'chat_id': 'room', 'logs_deleted': 0, 'documents_tombstoned': 0}
+    if purge(uploader) != empty or purge(outsider) != empty:
+        raise GateFailure('an already-purged room did not answer every root member alike')
+
+    def append(uid):
+        return json.loads(as_(uid, 'select public.ab_mutation_meta_append('
+            f'{_quote(root)}, {_quote(str(epoch))}::uuid, {_quote(str(uuid4()))}::uuid, '
+            f"{_quote('d' * 64)}, 'room', '{{\"members\":{{}}}}'::jsonb, "
+            f"{_quote(str(source))}::uuid, 1, false, {_quote(names[uid] + '|m1')}, "
+            '\'[{"id":"e1"}]\'::jsonb)'))['result']['applied']
+
+    if append(departed) is not False or append(outsider) is not False:
+        raise GateFailure('a purged room answered a meta append differently by principal')
+    after = _scalar(database_url, "select count(*) from public.ab_logs where root="
+                    f"{_quote(root)} and chat_id='room'")
+    if after != '0':
+        raise GateFailure('a purged room received records')
+
+
 def _validate_reaction_pairs(database_url: str) -> None:
     """Real row/unique-key races must never expose half a checkpoint pair."""
     root, actor, chat = 'typed-reaction-pair', uuid4(), 'room'
@@ -2873,7 +3195,7 @@ def _validate_receipt_retirement(database_url: str) -> None:
     operation, client, provider = uuid4(), 'a' * 64, 'b' * 64
     _run(database_url, 'begin; ' + _claims(actor)
          + _begin_sql(root, epoch, operation, 'member_leave', client, provider)
-         + f"; delete from public.ab_members where root={_quote(root)}; "
+         + f"; update public.ab_members set revoked_at=now() where root={_quote(root)}; "
          + _finish_sql(root, epoch, operation, 'member_leave', client, provider, '{"left":true}')
          + '; commit;')
     rotation_id = uuid4()
@@ -2913,6 +3235,423 @@ def _validate_receipt_retirement(database_url: str) -> None:
     final = json.loads(_scalar(database_url, observation_sql))
     if final['protocol_epoch'] != later['protocol_epoch']:
         raise GateFailure('failed exhausted rotation changed the current epoch')
+
+
+def _validate_name_retention(database_url: str) -> None:
+    """A claimed name is never freed, and one name has one owner across
+    ab_members and users/ docs (docs/NAME_RETENTION_AND_PRIVATE_POKES.md)."""
+    root, actor = 'name-retention', uuid4()
+    _prepare_root(database_url, root, actor)
+    name = root + '-member'
+
+    # This gate installs no table grants or RLS policies, so a login's
+    # writes run as the owner under that login's claims: the triggers see
+    # the login. The policy side is checked on Scratch.
+    def as_login(uid: UUID, sql: str, *, ok: bool = True):
+        return _run(database_url, 'begin; ' + _claims(uid) + sql + '; commit;',
+                    expect_ok=ok)
+
+    refused = as_login(actor, 'delete from public.ab_members where root = '
+                       f'{_quote(root)}', ok=False)
+    if 'never freed' not in refused.stderr:
+        raise GateFailure('a claimed name was deleted')
+    renamed = _run(database_url, "update public.ab_members set username = 'other' "
+                   f'where root = {_quote(root)};', expect_ok=False)
+    if 'member identity is immutable' not in renamed.stderr:
+        raise GateFailure('a membership row changed its name')
+
+    _run(database_url, 'update public.ab_members set revoked_at = now() '
+         f'where root = {_quote(root)} and uid = {_quote(str(actor))}::uuid;')
+    restored = _run(database_url, 'update public.ab_members set revoked_at = null '
+                    f'where root = {_quote(root)};', expect_ok=False)
+    if 'a revoked name stays revoked' not in restored.stderr:
+        raise GateFailure('a revoked name was restored')
+    seen = _scalar(database_url, 'begin; ' + _claims(actor)
+                   + f"select public.ab_member({_quote(root)}) || '|' || "
+                   f'public.ab_root_ok({_quote(root)})::text || '
+                   "'|' || private.ab_mutation_lock_actor("
+                   f'{_quote(root)}); commit;')
+    if seen != '|false|':
+        raise GateFailure('a revoked login still resolved to its name')
+
+    # Another login cannot take the revoked name: the unique key holds.
+    taken = as_login(uuid4(), 'insert into public.ab_members(root, username, uid) '
+                     f'values ({_quote(root)}, {_quote(name)}, auth.uid())',
+                     ok=False)
+    if 'duplicate key' not in taken.stderr:
+        raise GateFailure('a revoked name was claimed again')
+
+    # An account's name (an agent, no login) cannot be claimed by anyone.
+    _run(database_url, 'insert into public.ab_docs(root, path, data) values ('
+         f"{_quote(root)}, 'users/helper-agent.json', "
+         """'{"kind":"agent"}'::jsonb);""")
+    squat = as_login(uuid4(), 'insert into public.ab_members(root, username, uid) '
+                     f"values ({_quote(root)}, 'helper-agent', auth.uid())",
+                     ok=False)
+    if 'name belongs to an existing account' not in squat.stderr:
+        raise GateFailure("a login claimed an existing account's name")
+
+    # A name a login holds cannot get another login's account doc, while
+    # the holder's own doc and the service role's write both pass.
+    holder, other = uuid4(), uuid4()
+    as_login(holder, 'insert into public.ab_members(root, username, uid) '
+             f"values ({_quote(root)}, 'held', auth.uid())")
+    foreign = _run(database_url, 'begin; ' + _claims(other)
+                   + 'insert into public.ab_docs(root, path, data) values ('
+                   f"{_quote(root)}, 'users/held.json', '{{}}'::jsonb); commit;",
+                   expect_ok=False)
+    if 'name is claimed by another login' not in foreign.stderr:
+        raise GateFailure("an account doc took another login's name")
+    _run(database_url, 'begin; ' + _claims(holder)
+         + 'insert into public.ab_docs(root, path, data) values ('
+         f"{_quote(root)}, 'users/held.json', '{{}}'::jsonb); commit;")
+    as_login(other, 'insert into public.ab_members(root, username, uid) '
+             f"values ({_quote(root)}, 'held-too', auth.uid())")
+    _run(database_url, 'begin; set local "request.jwt.claim.role" = '
+         "'service_role'; insert into public.ab_docs(root, path, data) values ("
+         f"{_quote(root)}, 'users/held-too.json', '{{}}'::jsonb); commit;")
+
+    # Hard deletes of account rows are skipped; other rows still go.
+    _run(database_url, 'insert into public.ab_docs(root, path, data, deleted) '
+         f"values ({_quote(root)}, 'status/old.json', '{{}}'::jsonb, true);"
+         'update public.ab_docs set deleted = true where root = '
+         f"{_quote(root)} and path = 'users/helper-agent.json';")
+    _run(database_url, 'delete from public.ab_docs where root = '
+         f'{_quote(root)} and deleted;')
+    left = _scalar(database_url, "select string_agg(path, ',' order by path) "
+                   f'from public.ab_docs where root = {_quote(root)} and deleted;')
+    if left != 'users/helper-agent.json':
+        raise GateFailure('a bulk purge removed an account row or kept another')
+
+
+def _validate_commit_ordered_feeds(database_url: str) -> None:
+    """P7 (docs/COMMIT_ORDERED_CURSORS.md) with real concurrent sessions.
+
+    seq and id are handed out before commit. These schedules commit rows out
+    of that order and check that the feeds never pass a row still in flight,
+    that a second append to one log waits for the first and then draws a
+    larger id, and that a hard delete answers "too old" below its floor.
+    Runs as the owner: the gate installs no table grants or policies.
+    """
+    suffix = uuid4().hex[:10]
+    root = 'feeds-' + suffix
+    # The legacy gate creates the root's row on its first write; creating it
+    # here keeps a held writer from making every other writer wait on it.
+    _run(database_url, 'insert into public.ab_mutation_roots(root) values ('
+         + _quote(root) + ') on conflict (root) do nothing;')
+
+    def feed(kind: str, after: tuple[int, int], limit: int = 100) -> dict:
+        return json.loads(_scalar(
+            database_url,
+            f'select public.ab_{kind}_feed({_quote(root)}, {int(after[0])}, '
+            f'{int(after[1])}, {int(limit)})::text;'))
+
+    def drain(kind: str, after: tuple[int, int]) -> tuple[list[dict], tuple[int, int]]:
+        rows: list[dict] = []
+        while True:
+            answer = feed(kind, after, limit=2)
+            if answer['too_old']:
+                raise GateFailure(f'{kind} feed answered too_old unexpectedly')
+            rows.extend(answer['rows'])
+            after = (int(answer['next'][0]), int(answer['next'][1]))
+            if not answer['has_more']:
+                return rows, after
+
+    def doc(path: str) -> str:
+        return ('insert into public.ab_docs(root, path, data) values ('
+                f'{_quote(root)}, {_quote(path)}, \'{{}}\'::jsonb)')
+
+    def log(chat: str, name: str, line: str) -> str:
+        return ('insert into public.ab_logs(root, chat_id, log_name, line) values ('
+                f'{_quote(root)}, {_quote(chat)}, {_quote(name)}, {_quote(line)})')
+
+    def session(name: str) -> _PsqlSession:
+        opened = _PsqlSession(database_url)
+        opened.send(f'set application_name={_quote(name)};')
+        return opened
+
+    def wait_blocked(holder: str, waiter: str) -> None:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            blocked = _scalar(database_url,
+                'select exists(select 1 from pg_catalog.pg_stat_activity h '
+                'join pg_catalog.pg_stat_activity w on '
+                'h.pid = any(pg_catalog.pg_blocking_pids(w.pid)) '
+                f'where h.application_name={_quote(holder)} '
+                f'and w.application_name={_quote(waiter)});')
+            if blocked == 't':
+                return
+            time.sleep(0.025)
+        raise GateFailure(f'{waiter} never waited on {holder}')
+
+    # 1. A takes the smaller seq and stays open; B commits a larger one.
+    a = session('feed-a-' + suffix)
+    try:
+        a.send('begin; ' + doc('a') + "; select 'feed-a-ready';")
+        a.wait_marker('feed-a-ready')
+        _run(database_url, doc('b') + ';')
+        first, cursor = drain('docs', (0, 0))
+        if any(row['path'] in {'a', 'b'} for row in first):
+            raise GateFailure('the doc feed served a row at or above a running transaction')
+        a.send("commit; select 'feed-a-done';")
+        a.wait_marker('feed-a-done')
+        a.finish()
+    finally:
+        a.abort()
+    second, cursor = drain('docs', cursor)
+    if sorted(row['path'] for row in second) != ['a', 'b']:
+        raise GateFailure('the doc feed skipped a late commit')
+
+    # 2. B gets its transaction id first, A takes a smaller seq, B commits.
+    a, b = session('feed-a2-' + suffix), session('feed-b2-' + suffix)
+    try:
+        b.send('begin; ' + doc('x') + "; select 'feed-b2-xid';")
+        b.wait_marker('feed-b2-xid')
+        a.send('begin; ' + doc('a2') + "; select 'feed-a2-ready';")
+        a.wait_marker('feed-a2-ready')
+        b.send(doc('b2') + "; commit; select 'feed-b2-done';")
+        b.wait_marker('feed-b2-done')
+        b.finish()
+        third, cursor = drain('docs', cursor)
+        if any(row['path'] == 'a2' for row in third):
+            raise GateFailure('the doc feed served an uncommitted row')
+        a.send("commit; select 'feed-a2-done';")
+        a.wait_marker('feed-a2-done')
+        a.finish()
+    finally:
+        a.abort()
+        b.abort()
+    fourth, cursor = drain('docs', cursor)
+    served = [row['path'] for row in third + fourth]
+    if sorted(served) != ['a2', 'b2', 'x']:
+        raise GateFailure(f'the doc feed lost or repeated a row: {served}')
+
+    # 3. Two appends to one log: the second waits, then draws a larger id.
+    #    An append to another log does not wait.
+    a, b = session('log-a-' + suffix), session('log-b-' + suffix)
+    try:
+        a.send('begin; ' + log('c1', 'u@m', 'first') + "; select 'log-a-ready';")
+        a.wait_marker('log-a-ready')
+        _run(database_url, log('c1', 'v@m', 'other log') + ';', timeout=5)
+        b.send('begin; ' + log('c1', 'u@m', 'second') + "; commit; select 'log-b-done';")
+        wait_blocked('log-a-' + suffix, 'log-b-' + suffix)
+        logs_first, log_cursor = drain('logs', (0, 0))
+        if any(row['log_name'] == 'u@m' for row in logs_first):
+            raise GateFailure('the log feed served an uncommitted append')
+        a.send("commit; select 'log-a-done';")
+        a.wait_marker('log-a-done')
+        b.wait_marker('log-b-done')
+        a.finish()
+        b.finish()
+    finally:
+        a.abort()
+        b.abort()
+    ids = [int(value) for value in _run(
+        database_url,
+        f'select id from public.ab_logs where root = {_quote(root)} '
+        "and log_name = 'u@m' order by line;").stdout.split()]
+    if len(ids) != 2 or not ids[0] < ids[1]:
+        raise GateFailure(f'one log\'s ids do not follow commit order: {ids}')
+    logs_second, log_cursor = drain('logs', log_cursor)
+    named = sorted((row['log_name'], int(row['id'])) for row in logs_first + logs_second)
+    if [name for name, _ in named].count('u@m') != 2 or len(named) != 3:
+        raise GateFailure(f'the log feed lost or repeated an append: {named}')
+
+    # 4. Purging a tombstone raises the floor to the tombstone: an older
+    #    cursor is too old, one past the tombstone is not. Hard-deleting a
+    #    live row raises it to the deleting transaction: every cursor read
+    #    before is too old. An empty delete leaves no floor.
+    _run(database_url, 'delete from public.ab_docs where root = '
+         + _quote(root) + " and path = 'no-such-path';")
+    if _scalar(database_url, 'select count(*) from public.ab_doc_floors '
+               f'where root = {_quote(root)};') != '0':
+        raise GateFailure('an empty delete raised the floor')
+    _run(database_url, 'update public.ab_docs set deleted = true where root = '
+         + _quote(root) + " and path = 'x';")
+    tombstoned, cursor = drain('docs', cursor)
+    if [row['path'] for row in tombstoned] != ['x'] or not tombstoned[0]['deleted']:
+        raise GateFailure('the doc feed did not serve the tombstone')
+    _run(database_url, 'delete from public.ab_docs where root = '
+         + _quote(root) + " and path = 'x';")
+    if not feed('docs', (0, 0))['too_old']:
+        raise GateFailure('a cursor below the floor was not too old')
+    if feed('docs', cursor)['too_old']:
+        raise GateFailure('a cursor past the purged tombstone was answered too old')
+    _run(database_url, 'delete from public.ab_docs where root = '
+         + _quote(root) + " and path = 'a';")
+    if not feed('docs', cursor)['too_old']:
+        raise GateFailure('a cursor read before a live row\'s hard delete was not too old')
+    _, cursor = drain('docs', (int(json.loads(_scalar(
+        database_url, f'select public.ab_feeds_frontier({_quote(root)})::text;'
+    ))['frontier']), 0))
+    if feed('docs', cursor)['too_old']:
+        raise GateFailure('a cursor read after a live row\'s hard delete was answered too old')
+    horizon = int(_scalar(database_url,
+        'select pg_catalog.pg_snapshot_xmax(pg_catalog.pg_current_snapshot())'
+        '::text::bigint;'))
+    if not feed('docs', (horizon + 1000, 0))['too_old']:
+        raise GateFailure('a cursor from the future was not too old')
+
+
+def _validate_provider_admission(database_url: str) -> None:
+    """Prospective admission reserves capacity and pins outcomes through closure."""
+    root, actor = 'provider-admission', uuid4()
+    before = _prepare_root(database_url, root, actor)
+    sealed = json.loads(_scalar(database_url, _seal_sql(root, before, uuid4())))
+    epoch = UUID(sealed['protocol_epoch'])
+    _run(database_url, f"select public.ab_admin_enable_mutation_admission({_quote(root)}, {_quote(str(epoch))}::uuid);")
+
+    def authenticated(sql, *, ok=True):
+        statement = 'begin; set local role authenticated; ' + _claims(actor) + sql + '; commit;'
+        return _scalar(database_url, statement) if ok else _run(database_url, statement, expect_ok=False)
+
+    def admit(owner, plan):
+        return ('select public.ab_admit_mutation_owner('
+                f'{_quote(root)}, {_quote(str(epoch))}::uuid, {_quote(str(owner))}::uuid, '
+                f'{_quote(json.dumps(plan))}::jsonb)')
+
+    def leg(kind='doc_put'):
+        return {'operation_id': str(uuid4()), 'kind': kind, 'client_digest': 'a' * 64}
+
+    def cancel(owner, item, *, ack=False):
+        name = 'ab_ack_mutation_admission_cancel' if ack else 'ab_cancel_mutation_admission'
+        return (f'select public.{name}({_quote(root)}, {_quote(str(epoch))}::uuid, '
+                f'{_quote(str(owner))}::uuid, {_quote(item["operation_id"])}::uuid, '
+                f'{_quote(item["kind"])}, {_quote(item["client_digest"])})')
+
+    def put(item, path):
+        return ('select public.ab_mutation_doc_put('
+                f'{_quote(root)}, {_quote(str(epoch))}::uuid, {_quote(item["operation_id"])}::uuid, '
+                f'{_quote(item["client_digest"])}, {_quote(path)}, \'{{}}\'::jsonb)')
+
+    def ack(receipt):
+        return _receipt_sql('ab_ack_mutation_receipt', root, epoch,
+                            UUID(receipt['operation_id']), receipt['client_digest'], receipt['provider_digest'])
+
+    owner = uuid4()
+    plan = [leg(), leg(), leg('member_leave')]
+    admitted = json.loads(authenticated(admit(owner, plan)))
+    expected = dict(schema_version=1, root=root, actor_id=str(actor), protocol_epoch=str(epoch),
+                    owner_id=str(owner), status='admitted', plan=plan)
+    if admitted != expected or json.loads(authenticated(admit(owner, plan))) != expected:
+        raise GateFailure('admission lost-response replay changed immutable plan')
+    altered = [dict(item) for item in plan]
+    altered[0]['client_digest'] = 'b' * 64
+    authenticated(admit(owner, altered), ok=False)
+    # Option B: admission is optional per owner; a single-leg write takes a
+    # free unreserved slot directly and must be acknowledged before closure.
+    unadmitted = json.loads(authenticated(put(leg(), 'unadmitted.json')))
+    first = json.loads(authenticated(put(plan[0], 'admitted.json')))
+    if json.loads(authenticated(cancel(owner, plan[0])))['status'] != 'executed':
+        raise GateFailure('cancellation fabricated non-effect after committed write')
+    cancelled = json.loads(authenticated(cancel(owner, plan[1])))
+    if cancelled['status'] != 'cancelled' or json.loads(authenticated(cancel(owner, plan[1]))) != cancelled:
+        raise GateFailure('cancellation replay lost exact no-effect outcome')
+    authenticated(put(plan[1], 'cancelled.json'), ok=False)
+    rotation = (f'select public.ab_admin_rotate_mutation_epoch({_quote(root)}, '
+                f'{_quote(str(epoch))}::uuid, {_quote(str(uuid4()))}::uuid);')
+    _run(database_url, rotation, expect_ok=False)
+    authenticated(ack(first))
+    authenticated(ack(unadmitted))
+    authenticated(cancel(owner, plan[1], ack=True))
+    _run(database_url, rotation, expect_ok=False)  # Unused membership leg pins epoch.
+    member = plan[2]
+    left = json.loads(authenticated('select public.ab_mutation_member_leave('
+                      f'{_quote(root)}, {_quote(str(epoch))}::uuid, '
+                      f'{_quote(member["operation_id"])}::uuid, {_quote(member["client_digest"])})'))
+    if json.loads(authenticated(admit(owner, plan))) != expected:
+        raise GateFailure('admission replay incorrectly required current membership')
+    authenticated(admit(uuid4(), [leg()]), ok=False)
+    authenticated(ack(left))
+    _run(database_url, rotation)
+    authenticated(put(plan[0], 'admitted.json'), ok=False)
+    if _scalar(database_url, f"select count(*) from public.ab_docs where root={_quote(root)} and path='cancelled.json';") != '0':
+        raise GateFailure('cancelled admitted mutation changed source')
+    if _scalar(database_url, f"select count(*) from public.ab_docs where root={_quote(root)} and path='unadmitted.json';") != '1':
+        raise GateFailure('optional admission refused an unadmitted single-leg write')
+
+    # A new authenticated principal can reserve its one claim, but not source
+    # writes before membership exists.
+    actor = uuid4()
+    epoch = UUID(json.loads(_scalar(database_url,
+        'begin; set local role authenticated; ' + _claims(actor)
+        + f"select public.ab_mutation_epoch_state({_quote(root)}); commit;"))['protocol_epoch'])
+    claim_owner, claim_plan = uuid4(), [leg('member_claim')]
+    authenticated(admit(uuid4(), [leg()]), ok=False)
+    authenticated(admit(claim_owner, claim_plan))
+    claim = claim_plan[0]
+    claimed = json.loads(authenticated('select public.ab_mutation_member_claim('
+        f'{_quote(root)}, {_quote(str(epoch))}::uuid, {_quote(claim["operation_id"])}::uuid, '
+        f"{_quote(claim['client_digest'])}, 'admission-new-member')"))
+    if claimed['result'] != {'username': 'admission-new-member', 'claimed': True}:
+        raise GateFailure('admission broke authenticated new-member claim')
+
+    # An unaffiliated principal holds one reservation not yet settled for
+    # closure and four claims per epoch, never the shared slot pool.
+    actor = uuid4()
+    pending_owner, pending_plan = uuid4(), [leg('member_claim')]
+    pending = json.loads(authenticated(admit(pending_owner, pending_plan)))
+    if json.loads(authenticated(admit(pending_owner, pending_plan))) != pending:
+        raise GateFailure('unaffiliated admission bound blocked exact owner replay')
+    authenticated(admit(uuid4(), [leg('member_claim')]), ok=False)
+    authenticated(cancel(pending_owner, pending_plan[0]))
+    authenticated(admit(uuid4(), [leg('member_claim')]), ok=False)  # unacknowledged
+    authenticated(cancel(pending_owner, pending_plan[0], ack=True))
+    for _ in range(3):
+        claim_owner, claim_plan = uuid4(), [leg('member_claim')]
+        if json.loads(authenticated(admit(claim_owner, claim_plan)))['status'] != 'admitted':
+            raise GateFailure('settled unaffiliated reservation blocked a new claim')
+        authenticated(cancel(claim_owner, claim_plan[0]))
+        authenticated(cancel(claim_owner, claim_plan[0], ack=True))
+    authenticated(admit(uuid4(), [leg('member_claim')]), ok=False)
+    if _scalar(database_url, 'select count(*) from public.ab_mutation_admission_groups '
+               f'where root={_quote(root)} and actor_uid={_quote(str(actor))}::uuid;') != '4':
+        raise GateFailure('unaffiliated admission exceeded its per-epoch claim budget')
+
+    # Whole owner capacity survives unrelated clients filling every other slot.
+    root = 'provider-admission-full'
+    actor, other_actor = uuid4(), uuid4()
+    before = _prepare_root(database_url, root, actor)
+    _run(database_url, 'insert into public.ab_members(root,username,uid) values ('
+         f"{_quote(root)}, 'capacity-peer', {_quote(str(other_actor))}::uuid);")
+    sealed = json.loads(_scalar(database_url, _seal_sql(root, before, uuid4())))
+    epoch = UUID(sealed['protocol_epoch'])
+    _run(database_url, f"select public.ab_admin_enable_mutation_admission({_quote(root)}, {_quote(str(epoch))}::uuid);")
+    owner, plan = uuid4(), [leg(), leg()]
+    authenticated(admit(owner, plan))
+    primary_actor, actor = actor, other_actor
+    for size in (1024, 1024, 1024, 1020):
+        result = json.loads(authenticated(admit(uuid4(), [leg() for _ in range(size)])))
+        if result['status'] != 'admitted':
+            raise GateFailure('provider rejected available owner reservation capacity')
+    # Unadmitted writes take only the two unreserved slots, then see a full
+    # epoch (reservations count), never contention and never a reserved slot.
+    direct = [leg(), leg()]
+    for item in direct:
+        authenticated(put(item, 'direct-' + item['operation_id'] + '.json'))
+    overflow = authenticated(put(leg(), 'overflow.json'), ok=False)
+    if 'epoch is full' not in overflow.stderr.lower():
+        raise GateFailure('unadmitted write did not count reserved slots as occupied')
+    if _scalar(database_url, 'select count(*) from public.ab_mutation_receipts r '
+               'join public.ab_mutation_admission_legs l on l.root=r.root '
+               'and l.protocol_epoch=r.protocol_epoch and l.receipt_slot=r.receipt_slot '
+               f'and l.operation_id<>r.operation_id where r.root={_quote(root)};') != '0':
+        raise GateFailure('unadmitted write took a reserved admission slot')
+    # An operation that already executed unadmitted can never gain a leg.
+    authenticated(admit(uuid4(), [direct[0]]), ok=False)
+    actor = primary_actor
+    waiting_owner, waiting_plan = uuid4(), [leg()]
+    full = json.loads(authenticated(admit(waiting_owner, waiting_plan)))
+    if full['status'] != 'full' or json.loads(authenticated(admit(waiting_owner, waiting_plan))) != full:
+        raise GateFailure('full admission was not an effect-free repeatable result')
+    receipt = json.loads(authenticated(put(plan[0], 'reserved-last-slot.json')))
+    authenticated(ack(receipt))
+    if json.loads(authenticated(admit(owner, plan)))['status'] != 'admitted':
+        raise GateFailure('full ledger lost prior owner reservation')
+    authenticated(cancel(owner, plan[1]))
+    authenticated(cancel(owner, plan[1], ack=True))
+    if json.loads(authenticated(admit(waiting_owner, waiting_plan)))['status'] != 'full':
+        raise GateFailure('cancelled slot reused before epoch closure')
 
 
 def main() -> int:
@@ -2983,7 +3722,17 @@ def main() -> int:
     _validate_p1b_blob_manifest_lock(database_url)
     _validate_conditional_documents(database_url)
     _validate_reaction_pairs(database_url)
+    _validate_meta_append(database_url)
+    _validate_terminal_readers(database_url)
     _validate_receipt_retirement(database_url)
+    _validate_name_retention(database_url)
+    _validate_commit_ordered_feeds(database_url)
+    _validate_provider_admission(database_url)
+    if __package__:
+        from devtools.provider_admission_race_gate import _validate_provider_admission_races
+    else:
+        from provider_admission_race_gate import _validate_provider_admission_races
+    _validate_provider_admission_races(database_url)
     _run(database_url, _protocol_sql(), timeout=30)
     print(json.dumps({
         "database": database_name,
@@ -2998,6 +3747,9 @@ def main() -> int:
             "typed-doc-put", "typed-doc-create", "typed-doc-delete",
             "typed-log-append", "typed-chat-genesis",
             "typed-member-claim", "typed-member-leave",
+            "name-retention", "name-one-owner",
+            "feed-late-commit", "feed-out-of-order-xid", "feed-log-commit-order",
+            "feed-floor-and-horizon",
             "typed-terminal-chat-delete", "typed-chat-delete-exact-prefix",
             "typed-room-terminal-lock",
             "typed-effect-claim", "typed-effect-state-chain",
@@ -3015,7 +3767,12 @@ def main() -> int:
             "reaction-pair-exact-replay-and-atomic-rollback",
             "reaction-pair-two-document-put-create-delete-races",
             "reaction-pair-pair-race-and-membership-replay",
+            "meta-append-atomic-swap-replay-and-race",
             "receipt-retirement-generation-ack-closure",
+            "provider-admission-full-owner-reservation",
+            "provider-admission-replay-cancellation-closure",
+            "provider-admission-execute-cancel-lock-order",
+            "provider-admission-rotation-lock-order",
             "schema-rerun",
         ],
     }, sort_keys=True))

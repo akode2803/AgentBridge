@@ -97,7 +97,8 @@ class Mesh:
         self.directory = Directory(self.tx, pins=self.key_pins, store=self.store)
         self.keystore = KeyStore(self.home)
         self._sign_bundle: bytes | None = None  # _sign_event's positive cache
-        self.keys = ChatKeyService(self.tx, self.directory, self.keystore, user)
+        self.keys = ChatKeyService(self.tx, self.directory, self.keystore, user,
+                                   store=self.store)
         # sealer resolution: explicit arg wins; else E2EE when asked, else plain
         if sealer is not None:
             self.sealer = sealer
@@ -149,7 +150,8 @@ class Mesh:
             success_hooks=self.messaging.outbox_success_hooks(),
             dead_hooks=self.messaging.outbox_dead_hooks(),
             prune_hooks=self.messaging.outbox_prune_hooks(),
-            recover_actions=self.messaging.recover_state_actions)
+            recover_actions=lambda: (self.messaging.recover_state_actions()
+                                     + self.membership.sweep()))
         self.bus = EventBus()
         subscribe_changes = getattr(self.tx, "subscribe_changes", None)
         self._mirror_unsubscribe = (
@@ -258,14 +260,13 @@ class Mesh:
         """Current membership plus terminal-evidence catch-up authority.
 
         Deleted metadata empties ``members`` before another client may have
-        fetched the signed terminal log. Former authenticated tenure is enough
-        to fetch that evidence, but does not restore GUI/message membership.
+        fetched the signed terminal log. Its final members (older deletions:
+        its tenure) may fetch that evidence, which does not restore
+        GUI/message membership.
         """
         try:
             snap = self.messaging.snapshot(chat_id)
-            return snap.is_member(self.user) or (
-                snap.deleted and self.user in snap.tenure
-            )
+            return snap.is_member(self.user) or snap.terminal_reader(self.user)
         except Exception:  # noqa: BLE001 — unreadable meta = not sync-visible
             return False
 
@@ -461,6 +462,10 @@ class Mesh:
 
         if self.keystore.load(agent) is None:
             return  # no keys = no signed goodbye; the heal cascades silently
+        if self.membership._typed():
+            # The provider would check this session's (the owner's) membership,
+            # not the agent's; the heal drops the agent at the next swap.
+            return
         scoped = Mesh(
             self.tx, agent, self.machine, home=self.home,
             encrypt=isinstance(self.sealer, E2EESealer),

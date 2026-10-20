@@ -7,8 +7,10 @@ Mapping (schema in ``docs/supabase_schema.sql``, pasted once by the owner):
   so ``read_log`` is a WHERE id > cursor — no half-synced-line problem by
   construction);
 - blobs -> one private Storage bucket ("ab-mesh"), keys ``<root>/<path>``;
-- hints -> a realtime BROADCAST channel per root: every writer announces
-  after a write, every watcher wakes early. The channel lives on a daemon
+- hints -> a private realtime BROADCAST channel per root: every writer
+  announces after a write, every watcher wakes early. Only active members
+  of the root may join or send, so it joins as this transport's own
+  identity (docs/NAME_RETENTION_AND_PRIVATE_POKES.md). The channel lives on a daemon
   thread with its own event loop (supabase realtime is async-only — the R1
   note); if the socket is blocked or drops, everything silently degrades to
   pure polling, because the poll stays the source of truth (tenet 6).
@@ -42,7 +44,9 @@ from pathlib import Path
 from typing import Any
 
 from ..core.errors import TransportError, ValidationError
-from .base import Transport, TransportProfile, Watcher
+from .base import (
+    CursorTooOld, FeedCursor, Transport, TransportProfile, Watcher,
+)
 from .change_ledger import (
     ChangeLedgerCapability,
     ChangeLedgerEpoch,
@@ -96,6 +100,12 @@ _POSTGREST_TIMEOUT_S = 6
 _STORAGE_TIMEOUT_S = 20
 _FUNCTION_TIMEOUT_S = 6
 _RT_MAX_BACKOFF_S = 15.0
+# A join the server refused for authorization (a revoked member, a policy
+# mistake, a mixed rollout) waits this long, so it does not churn sockets.
+_RT_REFUSED_BACKOFF_S = 300.0
+# How often the Realtime thread re-reads the member session's access token.
+_RT_TOKEN_CHECK_S = 30.0
+_LIST_PAGE = 100  # Storage's maximum page of names per list call
 
 # R76 (docs/SCALING.md §3) — writer-side hint coalescing. A hint is a
 # content-free wake-up; per-class intervals bound how long a write may wait
@@ -114,6 +124,10 @@ _MISSING_COL_MARKS = (
     "42703", "PGRST202", "PGRST204", "does not exist", "Could not find",
 )
 _DELTA_REPROBE_S = 60.0       # legacy mode re-probes (a paste upgrades live)
+_FEED_PAGE = 1000             # rows per feed answer (the RPCs refuse more)
+_DOC_PAGE = 1000              # rows per keyset page of a full or prefix pull
+_DOC_FEED_KEYS = frozenset({"path", "data", "deleted", "seq", "txid"})
+_LOG_FEED_KEYS = frozenset({"id", "chat_id", "log_name", "txid"})
 _LEDGER_REPROBE_S = 60.0
 _LEDGER_SCHEMA_VERSION = 1
 _SOURCE_LEDGER_SCHEMA_VERSION = 2
@@ -129,6 +143,28 @@ _MUTATION_PROTOCOL_REPROBE_S = 60.0
 def _is_missing_column(err: Exception) -> bool:
     s = str(err)
     return any(m in s for m in _MISSING_COL_MARKS)
+
+
+def _checked_prefix(prefix: str) -> str:
+    """A validated path prefix that keeps its trailing slash: ``_check``
+    strips it, and ``chats/c9`` would also match ``chats/c90/...``."""
+    if not prefix:
+        return ""
+    checked = _check(prefix)
+    return checked + "/" if prefix.replace("\\", "/").endswith("/") else checked
+
+
+def _feed_basis(epoch: Any) -> str:
+    """The FeedCursor basis of the commit-ordered feeds under ``epoch``."""
+    if epoch is not None and type(epoch) is not str:
+        raise ValueError("invalid feed epoch")
+    return "frontier:" + (epoch or "")
+
+
+def _feed_int(value: Any) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError("invalid feed position")
+    return value
 
 
 def load_supabase_env(home: Path | None = None) -> dict[str, str]:
@@ -202,7 +238,10 @@ class SupabaseTransport(Transport):
     # mirror/sync/presence layers slow their safety polls and lean on hints
     profile = TransportProfile(
         metered=True, supports_doc_delta=True,
-        idle_poll_s=45.0, fallback_poll_s=10.0, reconcile_s=6 * 3600.0,
+        # P7: the doc delta is commit-ordered, a new chat is caught up on
+        # join and a purged or restored history answers "too old", so the
+        # full pull is a once-a-day safety net that counts drift.
+        idle_poll_s=45.0, fallback_poll_s=10.0, reconcile_s=24 * 3600.0,
         # Each durable heartbeat is also an API Gateway log entry.  A 45-second
         # beat reduces the idle baseline while remaining inside older clients'
         # 120-second stale window after their own 45-second safety read.  New
@@ -278,6 +317,9 @@ class SupabaseTransport(Transport):
         # upgrades a live fleet without restarts.
         self._delta: bool | None = None
         self._delta_reprobe = 0.0
+        # P7: are the commit-ordered feed RPCs live? Same probing as _delta.
+        self._feeds: bool | None = None
+        self._feeds_reprobe = 0.0
         self._ret_min: bool | None = None  # library accepts returning="minimal"?
         self._effects_ready: bool | None = None
         self._effects_reprobe = 0.0
@@ -535,6 +577,8 @@ class SupabaseTransport(Transport):
             out = dict(self._stats)
         out["mode"] = ("delta" if self._delta
                        else "legacy" if self._delta is False else "unprobed")
+        out["feeds"] = ("commit-ordered" if self._feeds
+                        else "legacy" if self._feeds is False else "unprobed")
         out["realtime"] = self.realtime_status()
         with self._rt_state_lock:
             retry_at = self._rt_retry_at
@@ -542,18 +586,22 @@ class SupabaseTransport(Transport):
         return out
 
     # ------------------------------------------------------------ delta probe
-    def _delta_ok(self) -> bool:
+    def _delta_ok(self, *, strict: bool = True) -> bool:
         """Is the R76 migration (ab_docs.seq/deleted) live? Probes once; a
         legacy verdict re-probes every ``_DELTA_REPROBE_S`` so pasting the
         migration upgrades the fleet within a minute, no restart. A NETWORK
         fault leaves the verdict unchanged (never downgrades a working
-        delta mode to legacy full snapshots)."""
+        delta mode to legacy full snapshots). Before the first verdict a
+        network fault RAISES (``strict``): read as "legacy", a full pull
+        would return tombstones as live docs and a delete would hard-delete
+        a row other mirrors hold. Only diagnostics pass ``strict=False``."""
         if self._delta is True:
             return True
         if self._delta is False and time.monotonic() < self._delta_reprobe:
             return False
         try:
-            self._sb().table("ab_docs").select("seq").limit(1).execute()
+            self._retry(lambda: self._sb().table("ab_docs").select("seq")
+                        .limit(1).execute())
             self._delta = True
         except Exception as e:  # noqa: BLE001
             if _is_missing_column(e):
@@ -561,8 +609,75 @@ class SupabaseTransport(Transport):
                 self._delta_reprobe = time.monotonic() + _DELTA_REPROBE_S
             elif self._delta is None:
                 # can't tell yet (offline?) — stay unprobed, decide later
+                if strict:
+                    raise
                 return False
         return bool(self._delta)
+
+    # ------------------------------------------ commit-ordered feeds (P7)
+    def _feeds_ok(self) -> bool:
+        """Are the commit-ordered feed RPCs live (docs/COMMIT_ORDERED_CURSORS.md)?
+        A missing function re-probes every ``_DELTA_REPROBE_S``, and, as in
+        ``_delta_ok``, a network fault before the first verdict RAISES:
+        guessing "legacy" would hand out a cursor of the wrong kind and cost
+        a needless full pull once the network is back."""
+        if self._feeds is True:
+            return True
+        if self._feeds is False and time.monotonic() < self._feeds_reprobe:
+            return False
+        if not self._delta_ok():
+            return False
+        try:
+            self._feed_start()
+            self._feeds = True
+        except Exception as e:  # noqa: BLE001
+            if not _is_missing_column(e):
+                if self._feeds is None:
+                    raise
+                return False
+            self._feeds = False
+            self._feeds_reprobe = time.monotonic() + _DELTA_REPROBE_S
+        return bool(self._feeds)
+
+    def _feed_start(self) -> FeedCursor:
+        """The current frontier as a cursor. Every transaction below it has
+        finished, so a reader that then reads everything is current at it."""
+        raw = self._retry(lambda: self._sb().rpc(
+            "ab_feeds_frontier", {"p_root": self.root}).execute()).data
+        self._count(raw)
+        try:
+            return FeedCursor(_feed_int(raw["frontier"]),
+                              _feed_basis(raw["epoch"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TransportError(
+                "Supabase returned an invalid feed frontier") from exc
+
+    def _feed_page(self, fn: str, after: tuple[int, int],
+                   keys: frozenset[str]):
+        """One feed answer, checked: ``(rows, has_more, next, frontier,
+        basis, too_old)``."""
+        position = "p_after_seq" if fn == "ab_docs_feed" else "p_after_id"
+        raw = self._retry(lambda: self._sb().rpc(fn, {
+            "p_root": self.root, "p_after_txid": after[0],
+            position: after[1], "p_limit": _FEED_PAGE,
+        }).execute()).data
+        self._count(raw)
+        try:
+            rows, nxt = raw["rows"], raw["next"]
+            if (type(rows) is not list or len(rows) > _FEED_PAGE
+                    or any(type(r) is not dict or not keys <= r.keys()
+                           for r in rows)
+                    or type(raw["has_more"]) is not bool
+                    or type(raw["too_old"]) is not bool
+                    or type(nxt) is not list or len(nxt) != 2):
+                raise ValueError("invalid feed answer")
+            return (rows, raw["has_more"],
+                    (_feed_int(nxt[0]), _feed_int(nxt[1])),
+                    _feed_int(raw["frontier"]), _feed_basis(raw["epoch"]),
+                    raw["too_old"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TransportError(
+                f"Supabase returned an invalid {fn} answer") from exc
 
     # ----------------------------------------------------- durable change log
     @property
@@ -1341,35 +1456,66 @@ class SupabaseTransport(Transport):
         Unlike ``get_doc`` this RAISES on failure: the mirror must be able to
         tell 'the store is empty' apart from 'the network is down' (stale
         beats vanished)."""
-        prefix = _check(prefix) if prefix else ""
-        out: dict[str, Any] = {}
-        page = 1000
-        start = 0
+        prefix = _checked_prefix(prefix)
+        rows = self._keyset_docs(prefix, "path,data", live_only=self._delta_ok())
+        return {str(r["path"]): r["data"] for r in rows}
+
+    def _keyset_docs(self, prefix: str, cols: str, *,
+                     live_only: bool) -> list[dict]:
+        """Every ``ab_docs`` row under ``prefix``, paged by key (``path >
+        last``), not by offset: a row deleted or added between two pages
+        cannot shift a later page and hide another row. Reads until an empty
+        page, so a server row cap below the page size cannot end it early.
+        LIKE treats ``_`` in the prefix as a wildcard, so rows are re-checked
+        with an exact prefix test."""
+        out: list[dict] = []
+        last: str | None = None
         while True:
-            def fetch(lo: int = start):
-                q = self._sb().table("ab_docs").select("path,data") \
+            def fetch(after: str | None = last):
+                q = self._sb().table("ab_docs").select(cols) \
                     .eq("root", self.root)
-                if self._delta_ok():
+                if live_only:
                     q = q.eq("deleted", False)
                 if prefix:
                     q = q.like("path", f"{prefix}%")
-                return q.order("path").range(lo, lo + page - 1).execute()
+                if after is not None:
+                    q = q.gt("path", after)
+                return q.order("path").limit(_DOC_PAGE).execute()
             rows = self._retry(fetch).data
             self._count(rows)
-            for r in rows:
-                out[str(r["path"])] = r["data"]
-            if len(rows) < page:
+            if not rows:
                 return out
-            start += page
+            out.extend(r for r in rows if str(r["path"]).startswith(prefix))
+            if last is not None and str(rows[-1]["path"]) <= last:
+                raise TransportError("Supabase keyset doc read did not advance")
+            last = str(rows[-1]["path"])
 
     # ------------------------------------------------------- delta feed (R76)
     def snapshot_docs(self) -> tuple[dict[str, Any], int]:
         """Full snapshot + the cursor it is current at. The cursor is read
         BEFORE the snapshot: a row updated mid-pull gets a later seq than the
         cursor, so the next delta re-fetches it — never stale, only an
-        idempotent overlap (SCALING.md §2)."""
+        idempotent overlap (SCALING.md §2). With the commit-ordered feeds the
+        cursor is the frontier, and the pull includes tombstones so each
+        path's last write position rides on the cursor (drift counting)."""
         if not self._delta_ok():
             return self.get_docs(""), 0
+        if self._feeds_ok():
+            start = self._feed_start()
+            docs: dict[str, Any] = {}
+            positions: dict[str, int] = {}
+            for r in self._keyset_docs("", "path,data,deleted,txid",
+                                       live_only=False):
+                path = str(r["path"])
+                try:   # xid8 reaches PostgREST JSON as a string
+                    positions[path] = int(r["txid"])
+                except (TypeError, ValueError) as exc:
+                    raise TransportError(
+                        "Supabase returned an invalid doc txid") from exc
+                if not r.get("deleted"):
+                    docs[path] = r["data"]
+            return docs, FeedCursor(start.position, start.basis,
+                                    row_positions=positions)
         def head():
             return self._sb().table("ab_docs").select("seq") \
                 .eq("root", self.root).order("seq", desc=True) \
@@ -1381,11 +1527,17 @@ class SupabaseTransport(Transport):
     def get_docs_delta(self, cursor: int) -> tuple[dict[str, Any], set[str], int]:
         """Docs whose seq moved past ``cursor``: ``(changed, deleted, new
         cursor)``. Seq-keyed pagination (no offset paging over a moving set);
-        rows apply in seq order so the final state of a path wins."""
+        rows apply in seq order so the final state of a path wins. With the
+        commit-ordered feed the cursor is a ``FeedCursor`` at a frontier, and
+        anything else raises ``CursorTooOld``."""
         if not self._delta_ok():
             # the mirror falls back to a full pull on this signal — the
             # legacy schema has no cursor to serve (base contract)
             raise NotImplementedError("doc delta feed unavailable (legacy schema)")
+        if self._feeds_ok():
+            return self._docs_feed(cursor)
+        if isinstance(cursor, FeedCursor):
+            raise CursorTooOld("the commit-ordered doc feed is unavailable")
         changed: dict[str, Any] = {}
         deleted: set[str] = set()
         last = int(cursor)
@@ -1408,6 +1560,35 @@ class SupabaseTransport(Transport):
                     deleted.discard(path)
             if len(rows) < page:
                 return changed, deleted, last
+
+    def _docs_feed(self, cursor: Any) -> tuple[dict[str, Any], set[str], FeedCursor]:
+        if (not isinstance(cursor, FeedCursor)
+                or not cursor.basis.startswith("frontier:")):
+            raise CursorTooOld("doc cursor predates the commit-ordered feed")
+        changed: dict[str, Any] = {}
+        deleted: set[str] = set()
+        after = (cursor.position, 0)
+        while True:
+            rows, more, nxt, frontier, basis, too_old = self._feed_page(
+                "ab_docs_feed", after, _DOC_FEED_KEYS)
+            if too_old or basis != cursor.basis:
+                raise CursorTooOld("doc cursor is older than the server's history")
+            for r in rows:
+                path = r["path"]
+                if type(path) is not str or type(r["deleted"]) is not bool:
+                    raise TransportError("Supabase returned an invalid doc feed row")
+                if r["deleted"]:
+                    deleted.add(path)
+                    changed.pop(path, None)
+                else:
+                    changed[path] = r["data"]
+                    deleted.discard(path)
+            if not more:
+                return changed, deleted, FeedCursor(
+                    max(frontier, cursor.position), basis)
+            if nxt <= after:
+                raise TransportError("Supabase doc feed did not advance")
+            after = nxt
 
     # ----------------------------------------------------------------- writes
     def _write(self, build):
@@ -1545,20 +1726,26 @@ class SupabaseTransport(Transport):
 
     def purge_deleted_docs(self, older_than_days: float = 30.0) -> None:
         """Hard-drop tombstones old enough that every live mirror has long
-        seen them (the storage janitor calls this on its daily sweep)."""
-        if not self._delta_ok():
+        seen them (the storage janitor calls this on its daily sweep).
+        Account rows (``users/``) are kept forever: their tombstone keeps the
+        name taken, and the server skips their hard delete anyway."""
+        try:
+            if not self._delta_ok():
+                return
+        except Exception:  # noqa: BLE001 — offline: the next sweep retries
             return
         cutoff = time.time() - older_than_days * 86400
         iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(cutoff))
         try:
             self._retry(lambda: self._sb().table("ab_docs").delete()
                         .eq("root", self.root).eq("deleted", True)
+                        .not_.like("path", "users/%")
                         .lt("updated", iso).execute())
         except Exception:  # noqa: BLE001 — next sweep retries
             pass
 
     def list_docs(self, prefix: str) -> list[str]:
-        prefix = _check(prefix) if prefix else ""
+        prefix = _checked_prefix(prefix)
         def fetch():
             q = self._sb().table("ab_docs").select("path").eq("root", self.root)
             if self._delta_ok():
@@ -1595,9 +1782,35 @@ class SupabaseTransport(Transport):
             def run():
                 return self._sb().table("ab_logs").insert(row, **kw).execute()
             return run
-        self._write(build)
+        try:
+            self._write(build)
+        except Exception as e:  # noqa: BLE001 - a replay is checked below
+            # ab_logs_line_once lands a line once per log, so a replayed
+            # INSERT whose first try committed before its reply was lost
+            # gets 23505. Accept it only when that identical line is there.
+            if not (_is_unique_violation(e)
+                    and self._log_line_landed(chat_id, log_name, line,
+                                              record.get("id"))):
+                raise
         self._count()
         self._hints.request(_HINT_LOG_S)
+
+    def _log_line_landed(self, chat_id: str, log_name: str, line: str,
+                         record_id: Any) -> bool:
+        """Is this exact line already in the log? Only a unique violation
+        asks; the record id narrows the read, the comparison is exact."""
+        def run():
+            query = (self._sb().table("ab_logs").select("line")
+                     .eq("root", self.root).eq("chat_id", chat_id)
+                     .eq("log_name", log_name))
+            if (isinstance(record_id, str) and record_id.isascii()
+                    and record_id
+                    and all(c.isalnum() or c in ".:-" for c in record_id)):
+                query = query.like("line", f"%{record_id}%")
+            return query.execute()
+        rows = self._retry(run).data
+        self._count(rows)
+        return any(r.get("line") == line for r in rows)
 
     def read_log(
         self, chat_id: str, log_name: str, offset: int = 0
@@ -1622,7 +1835,15 @@ class SupabaseTransport(Transport):
         """The R30 sync fast path: ``ab_logs`` row ids are globally monotonic
         (one identity column for the whole table), so "what changed since?"
         is ONE indexed query no matter how many chats exist. Idle ticks cost
-        one empty-result round-trip instead of a list_logs RPC per chat."""
+        one empty-result round-trip instead of a list_logs RPC per chat.
+        With the commit-ordered feed (P7) the cursor is a ``FeedCursor`` and
+        the feed never passes a row still in flight; any other cursor raises
+        ``CursorTooOld`` with the frontier to restart from."""
+        if self._feeds_ok():
+            return self._logs_feed(cursor)
+        if isinstance(cursor, FeedCursor):
+            raise CursorTooOld("the commit-ordered log feed is unavailable",
+                               restart=self._log_head())
         rows = self._retry(
             lambda: self._sb().table("ab_logs").select("id,chat_id,log_name")
             .eq("root", self.root).gt("id", int(cursor)).order("id")
@@ -1640,6 +1861,40 @@ class SupabaseTransport(Transport):
                 seen.add(key)
                 pairs.append(key)
         return pairs, new_cursor
+
+    def _log_head(self) -> int:
+        """The root's newest ``ab_logs`` id: where the pre-P7 feed restarts
+        after the caller's scan (0 would walk every row, 1,000 a tick)."""
+        rows = self._retry(lambda: self._sb().table("ab_logs").select("id")
+                           .eq("root", self.root).order("id", desc=True)
+                           .limit(1).execute()).data
+        self._count(rows)
+        return int(rows[0]["id"]) if rows else 0
+
+    def _logs_feed(self, cursor: Any) -> tuple[list[tuple[str, str]], FeedCursor]:
+        if (not isinstance(cursor, FeedCursor)
+                or not cursor.basis.startswith("frontier:")):
+            raise CursorTooOld("log cursor predates the commit-ordered feed",
+                               restart=self._feed_start())
+        pairs: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        after = (cursor.position, 0)
+        while True:
+            rows, more, nxt, frontier, basis, too_old = self._feed_page(
+                "ab_logs_feed", after, _LOG_FEED_KEYS)
+            if too_old or basis != cursor.basis:
+                raise CursorTooOld("log cursor is older than the server's history",
+                                   restart=FeedCursor(frontier, basis))
+            for r in rows:
+                key = (str(r["chat_id"]), str(r["log_name"]))
+                if key not in seen:
+                    seen.add(key)
+                    pairs.append(key)
+            if not more:
+                return pairs, FeedCursor(max(frontier, cursor.position), basis)
+            if nxt <= after:
+                raise TransportError("Supabase log feed did not advance")
+            after = nxt
 
     def delete_chat(self, chat_id: str) -> None:
         chat_id = _check(chat_id)
@@ -1705,21 +1960,55 @@ class SupabaseTransport(Transport):
 
     def _strict_blob_size(self, path: str) -> int | None:
         """Return exact object size; unlike the read API, propagate failures."""
+        obj = self._strict_object(path)
+        return None if obj is None else int((obj.get("metadata") or {}).get("size") or 0) or None
+
+    def _strict_object(self, path: str) -> dict | None:
+        """The exact object's listing row, or None; propagates failures.
+
+        Storage lists 100 names per page, so the lookup searches for the exact
+        name and pages through every match: a folder with more objects must
+        never make a present object look missing.
+        """
         full = f"{self.root}/{_check(path)}"
         parent, _, name = full.rpartition("/")
-        rows = self._retry(lambda: self._store().list(parent))
-        for obj in rows or []:
-            if obj.get("name") == name:
-                meta = obj.get("metadata") or {}
-                return int(meta.get("size") or 0) or None
-        return None
+        offset = 0
+        while True:
+            rows = self._retry(lambda at=offset: self._store().list(
+                parent, {"limit": _LIST_PAGE, "offset": at, "search": name})) or []
+            for obj in rows:
+                if obj.get("name") == name and obj.get("id") is not None:
+                    return obj
+            if len(rows) < _LIST_PAGE:
+                return None
+            offset += _LIST_PAGE
+
+    def list_blobs(self, prefix: str) -> list[str]:
+        """Every object path under the folder ``prefix``, recursively, every
+        page (Storage folder listings are exact: no wildcards)."""
+        folders, out = [_check(prefix.rstrip("/"))], []
+        while folders:
+            folder, offset = folders.pop(), 0
+            while True:
+                rows = self._retry(lambda f=folder, at=offset: self._store().list(
+                    f"{self.root}/{f}", {"limit": _LIST_PAGE, "offset": at})) or []
+                for obj in rows:
+                    name = obj.get("name")
+                    if not isinstance(name, str) or not name:
+                        continue
+                    # Storage reports a sub-folder as an entry without an id.
+                    (folders if obj.get("id") is None else out).append(f"{folder}/{name}")
+                if len(rows) < _LIST_PAGE:
+                    break
+                offset += _LIST_PAGE
+        return sorted(out)
 
     def delete_blob(self, path: str) -> None:
         path = _check(path)
         # A missing object is already the goal. When it is currently visible,
         # require Storage to confirm that exact full key in its delete result;
         # the SDK may otherwise return an empty success under RLS.
-        if self._strict_blob_size(path) is None:
+        if self._strict_object(path) is None:
             return
         full = f"{self.root}/{path}"
 
@@ -1733,6 +2022,13 @@ class SupabaseTransport(Transport):
                 raise TransportError("storage did not confirm exact blob deletion")
 
         self._retry(remove)
+
+    def delete_blobs(self, paths: list[str]) -> None:
+        """Remove many objects, 100 keys a call, without confirmation (an
+        RLS-filtered key is silently kept: list again to know)."""
+        keys = [f"{self.root}/{_check(path)}" for path in paths]
+        for at in range(0, len(keys), _LIST_PAGE):
+            self._retry(lambda chunk=keys[at:at + _LIST_PAGE]: self._store().remove(chunk))
 
     # ---------------------------------------------------------------- events
     def watch(self) -> Watcher:
@@ -1797,7 +2093,34 @@ class SupabaseTransport(Transport):
             with self._rt_state_lock:
                 self._rt_ready_since = time.monotonic()
 
+    def _realtime_identity(self) -> bool:
+        """The private poke channel joins as this transport's own identity
+        (docs/NAME_RETENTION_AND_PRIVATE_POKES.md): a member session or the
+        service key, never anonymously. An injected client is the test seam;
+        the thread re-checks its own credential."""
+        mode = self.auth_mode
+        return (mode.startswith("member:") or mode == "service"
+                or mode.endswith(":service") or mode == "injected")
+
+    def _realtime_token(self) -> str:
+        """The member session's current access token, which the PostgREST
+        client keeps refreshed; the Realtime thread forwards each new one."""
+        client = self._client
+        if client is None or not self.auth_mode.startswith("member:"):
+            return ""
+        try:
+            session = client.auth.get_session()
+        except Exception:  # noqa: BLE001 - no token means no join this time
+            return ""
+        return str(getattr(session, "access_token", "") or "")
+
     def _ensure_rt(self):
+        try:
+            self._sb()     # auth_mode is "" until the client exists
+        except Exception:  # noqa: BLE001 - no client yet: poll-only this tick
+            return None
+        if not self._realtime_identity():
+            return None
         with self._rt_lock:
             if self._closed:
                 return None
@@ -1809,6 +2132,7 @@ class SupabaseTransport(Transport):
             old, self._rt = self._rt, None
             if old is not None:
                 failed = old.status() == "disconnected"
+                refused = bool(getattr(old, "refused", lambda: False)())
                 old.close()
                 if old.alive():
                     self._rt = old
@@ -1822,9 +2146,10 @@ class SupabaseTransport(Transport):
                         self._rt_failures += 1
                         delay = min(2 ** min(self._rt_failures - 1, 6),
                                     _RT_MAX_BACKOFF_S)
-                        self._rt_retry_at = now + min(
-                            _RT_MAX_BACKOFF_S,
-                            delay * (0.85 + random.random() * 0.3))
+                        self._rt_retry_at = now + (
+                            _RT_REFUSED_BACKOFF_S if refused else min(
+                                _RT_MAX_BACKOFF_S,
+                                delay * (0.85 + random.random() * 0.3)))
                         self._rt_ready_since = 0.0
                     self._rt_metric("rt_disconnects")
             with self._rt_state_lock:
@@ -1837,7 +2162,8 @@ class SupabaseTransport(Transport):
                     self._env, self.root, self._on_hint, self._rt_metric,
                     observe_ledger=observe_ledger,
                     on_ledger_event=self._on_ledger_event,
-                    ledger_auth_mode=self.auth_mode,
+                    auth_mode=self.auth_mode,
+                    token_source=self._realtime_token,
                 )
             except Exception:  # noqa: BLE001 — no realtime = poll-only
                 self._rt = None
@@ -1937,6 +2263,12 @@ class _HintWatcher(Watcher):
             pass
 
 
+def _authorization_refusal(error) -> bool:
+    """A join error that names missing permission, not a network fault."""
+    text = str(error or "").lower()
+    return "unauthorized" in text or "permission" in text
+
+
 class _RealtimeThread:
     """One daemon thread owning the async realtime channel for a root.
     Sends and receives change hints; any failure just goes quiet."""
@@ -1944,14 +2276,16 @@ class _RealtimeThread:
     def __init__(self, env: dict[str, str], root: str, on_hint,
                  on_metric=lambda _name: None, *, observe_ledger: bool = False,
                  on_ledger_event=lambda _event_id: None,
-                 ledger_auth_mode: str = "") -> None:
+                 auth_mode: str = "", token_source=None) -> None:
         self._env = env
         self._root = root
         self._on_hint = on_hint
         self._on_metric = on_metric
         self._observe_ledger = bool(observe_ledger)
         self._on_ledger_event = on_ledger_event
-        self._ledger_auth_mode = ledger_auth_mode
+        self._auth_mode = auth_mode
+        self._token_source = token_source
+        self._refused = False
         self._loop = asyncio.new_event_loop()
         self._channel = None
         self._ready = threading.Event()
@@ -2026,6 +2360,9 @@ class _RealtimeThread:
                     self._counted_ready = True
                     self._on_metric("rt_ready")
                 self._maybe_mark_ledger_ready()
+        if value == "CHANNEL_ERROR" and _authorization_refusal(_error):
+            with self._state_lock:
+                self._refused = True
         if value in {"TIMED_OUT", "CLOSED", "CHANNEL_ERROR"}:
             self._mark_disconnected()
 
@@ -2067,31 +2404,27 @@ class _RealtimeThread:
         from realtime import RealtimeChannelOptions
         from supabase import acreate_client
 
-        # Broadcast alone is public. Ledger observation is RLS-filtered and
-        # therefore must join as the same member credential class as PostgREST,
-        # or explicitly use the legacy service credential.
+        # The poke channel is private (docs/NAME_RETENTION_AND_PRIVATE_POKES.md):
+        # only active members of the root may join or send, so it joins as the
+        # transport's own identity and never anonymously. A member reuses the
+        # PostgREST session's access token instead of a second password
+        # sign-in; the legacy service mode uses the service key.
         publishable = self._env.get("SUPABASE_PUBLISHABLE_KEY", "")
         secret = self._env.get("SUPABASE_SECRET_KEY", "")
-        email = self._env.get("SUPABASE_MEMBER_EMAIL", "")
-        password = self._env.get("SUPABASE_MEMBER_PASSWORD", "")
-        member_auth = (
-            self._observe_ledger
-            and self._ledger_auth_mode.startswith("member:")
-            and publishable and email and password
-        )
+        member_auth = (self._auth_mode.startswith("member:")
+                       and bool(publishable) and self._token_source is not None)
         service_auth = (
-            self._observe_ledger
-            and (self._ledger_auth_mode == "service"
-                 or self._ledger_auth_mode.endswith(":service"))
+            (self._auth_mode == "service" or self._auth_mode.endswith(":service"))
             and bool(secret)
         )
-        key = publishable or secret
-        if service_auth:
-            key = secret
-        if self._observe_ledger and not (member_auth or service_auth):
-            raise ValidationError("Supabase ledger Realtime identity is unavailable")
-        if not key:
-            raise ValidationError("Supabase Realtime credential is unavailable")
+        if not (member_auth or service_auth):
+            raise ValidationError("Supabase Realtime identity is unavailable")
+        access_token = ""
+        if member_auth:
+            access_token = await asyncio.to_thread(self._token_source)
+            if not access_token:
+                raise ValidationError("Supabase member Realtime token is unavailable")
+        key = publishable if member_auth else secret
         sb = None
         try:
             sb = await asyncio.wait_for(
@@ -2099,22 +2432,18 @@ class _RealtimeThread:
                 timeout=10.0,
             )
             if member_auth:
-                auth_response = await asyncio.wait_for(sb.auth.sign_in_with_password({
-                    "email": email, "password": password,
-                }), timeout=10.0)
-                session = getattr(auth_response, "session", None)
-                access_token = getattr(session, "access_token", "")
-                if not access_token:
-                    raise ValidationError("Supabase member Realtime token is unavailable")
                 await asyncio.wait_for(
                     sb.realtime.set_auth(access_token), timeout=2.0,
                 )
             self._channel = sb.channel(
                 f"ab-{self._root}",
-                RealtimeChannelOptions(config={"broadcast": {
-                    "self": False,
-                    "replication_ready": self._observe_ledger,
-                }}))
+                RealtimeChannelOptions(config={
+                    "broadcast": {
+                        "self": False,
+                        "replication_ready": self._observe_ledger,
+                    },
+                    "private": True,
+                }))
             self._channel.on_broadcast("change", lambda _p: self._on_hint())
             if self._observe_ledger:
                 from realtime import RealtimePostgresChangesListenEvent
@@ -2131,10 +2460,22 @@ class _RealtimeThread:
                 timeout=10.0,
             )
             ledger_ready_deadline = time.monotonic() + 10.0
+            token_checked = time.monotonic()
             while not self._closing:
                 await asyncio.sleep(1.0)
                 if self.status() == "disconnected":
                     return
+                if (member_auth and time.monotonic() - token_checked
+                        >= _RT_TOKEN_CHECK_S):
+                    # Realtime re-checks the policies on each new token and
+                    # disconnects when the old one expires.
+                    token_checked = time.monotonic()
+                    fresh = await asyncio.to_thread(self._token_source)
+                    if fresh and fresh != access_token:
+                        await asyncio.wait_for(
+                            sb.realtime.set_auth(fresh), timeout=2.0,
+                        )
+                        access_token = fresh
                 if (self._observe_ledger and not self._ledger_ready.is_set()
                         and time.monotonic() >= ledger_ready_deadline):
                     self._mark_disconnected()
@@ -2173,6 +2514,11 @@ class _RealtimeThread:
     def status(self) -> str:
         with self._state_lock:
             return self._state
+
+    def refused(self) -> bool:
+        """Whether the server refused the join for authorization."""
+        with self._state_lock:
+            return self._refused
 
     def observes_change_ledger(self) -> bool:
         return self._observe_ledger

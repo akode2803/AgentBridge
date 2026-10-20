@@ -378,8 +378,10 @@ def test_manager_retained_agent_tool_returns_once_without_room_post(
 
     thread = threading.Thread(target=call_manager)
     thread.start()
+    # 30 s, not 10: a loaded Windows runner missed the claim at 10 s. The
+    # offer's acceptance window (60 s) still bounds every wait.
     try:
-        _wait_until(lambda: source_handoffs.read(chat_id, "run-1"), timeout=10)
+        _wait_until(lambda: source_handoffs.read(chat_id, "run-1"), timeout=30)
 
         # First pass accepts; the manager then authorizes while its provider call
         # remains blocked. A later pass atomically claims the child.
@@ -391,17 +393,17 @@ def test_manager_retained_agent_tool_returns_once_without_room_post(
             states = [event.state for event in views[0].events] if views else []
             return bool(claimed or HandoffState.ACCEPTED in states)
 
-        _wait_until(accepted_or_claimed, timeout=10)
+        _wait_until(accepted_or_claimed, timeout=30)
         work = claimed[0] if claimed else _wait_until(
-            lambda: destination.claim_ready(exclude=set()), timeout=10,
+            lambda: destination.claim_ready(exclude=set()), timeout=30,
         )[0]
         responder = _ChildResponder()
         destination.execute(work, responder)
-        thread.join(timeout=10)
+        thread.join(timeout=30)
     finally:
         if thread.is_alive():
             stopping.set()
-            thread.join(timeout=10)
+            thread.join(timeout=30)
 
     assert not thread.is_alive()
     assert outcome["value"] == "Specialist evidence"

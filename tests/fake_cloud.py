@@ -15,6 +15,7 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
+from uuid import NAMESPACE_URL, uuid5
 
 from agentbridge.transport import make_transport as _production_factory
 from agentbridge.transport.cache import CachingTransport
@@ -41,10 +42,31 @@ def refresh_transport(transport):
     return transport
 
 
+_FAKE_EPOCH = str(uuid5(NAMESPACE_URL, "agentbridge-fake-epoch"))
+_FIRST_XID = 1000   # transaction ids start apart from seq and row ids
+
+
+def _write_xid(db):
+    """The writing transaction's id (P7 ``txid``): a held transaction's while
+    finish_transaction commits it, else a fresh one per write."""
+    forced = db.get("_force_xid")
+    if forced is not None:
+        return forced
+    db["_xid"] = db.get("_xid", _FIRST_XID) + 1
+    return db["_xid"]
+
+
+def _frontier(db):
+    """pg_snapshot_xmin: the oldest transaction still in flight, else the
+    next id to be assigned."""
+    return min([*db.get("_held", ()), db.get("_xid", _FIRST_XID) + 1])
+
+
 def _touch_document(db, row):
     if not db.get("_legacy"):
         db["_docseq"] = db.get("_docseq", 0) + 1
         row["seq"] = db["_docseq"]
+        row["txid"] = _write_xid(db)
         row["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         row.setdefault("deleted", False)
 
@@ -57,6 +79,8 @@ class FakeQuery:
         self._lock = lock if lock is not None else threading.RLock()
         self.filters = []
         self._like = self._gt = self._lt = self._lte = None
+        self._not_like = None
+        self._negate = False
         self._in = None
         self._orders = []
         self._limit = self._range = None
@@ -91,9 +115,26 @@ class FakeQuery:
         self._in = (col, tuple(copy.deepcopy(values)))
         return self
 
-    def like(self, col, pat):
-        self._like = (col, str(pat))
+    @property
+    def not_(self):
+        self._negate = True
         return self
+
+    def like(self, col, pat):
+        if self._negate:
+            self._negate = False
+            self._not_like = (col, str(pat))
+        else:
+            self._like = (col, str(pat))
+        return self
+
+    @staticmethod
+    def _like_match(like, row):
+        pattern = "".join(
+            ".*" if char == "%" else "." if char == "_" else re.escape(char)
+            for char in like[1]
+        )
+        return re.fullmatch(pattern, str(row.get(like[0], ""))) is not None
 
     def gt(self, col, val):
         self._gt = (col, val)
@@ -122,13 +163,10 @@ class FakeQuery:
     def _match(self, row):
         if any(row.get(col) != val for col, val in self.filters):
             return False
-        if self._like:
-            pattern = "".join(
-                ".*" if char == "%" else "." if char == "_" else re.escape(char)
-                for char in self._like[1]
-            )
-            if re.fullmatch(pattern, str(row.get(self._like[0], ""))) is None:
-                return False
+        if self._like and not self._like_match(self._like, row):
+            return False
+        if self._not_like and self._like_match(self._not_like, row):
+            return False
         if self._gt and not row.get(self._gt[0], 0) > self._gt[1]:
             return False
         if self._lt and not str(row.get(self._lt[0], "")) < str(self._lt[1]):
@@ -171,9 +209,25 @@ class FakeQuery:
                 and r.get("path") == payload.get("path") for r in rows
             ):
                 raise RuntimeError("duplicate key value violates unique constraint (23505)")
+            # ab_omit_landed_line skips a line already in its log;
+            # ab_logs_line_once rejects one the trigger missed.
+            # "_no_log_line_skip" drops the trigger, "_no_log_line_index" both.
+            if (self.table == "ab_logs" and not self.db.get("_no_log_line_index")
+                    and any(all(r.get(key) == payload.get(key)
+                                for key in ("root", "chat_id", "log_name", "line"))
+                            for r in rows)):
+                if not self.db.get("_no_log_line_skip"):
+                    return FakeResult([])
+                raise RuntimeError("duplicate key value violates unique constraint (23505)")
             payload["id"] = self.db["_seq"] = self.db.get("_seq", 0) + 1
+            if self.table == "ab_logs":
+                payload["txid"] = _write_xid(self.db)
             self._touch(payload)
             rows.append(payload)
+            if self.table == "ab_logs" and self.db.get("_lose_log_replies", 0) > 0:
+                # the INSERT committed; its reply is lost on the way back
+                self.db["_lose_log_replies"] -= 1
+                raise RuntimeError("connection reset by peer")
             return FakeResult([payload])
         if op == "upsert":
             def matching(row):
@@ -201,6 +255,20 @@ class FakeQuery:
         if op == "delete":
             keep = [r for r in rows if not self._match(r)]
             gone = len(rows) - len(keep)
+            if self.table == "ab_docs" and gone:
+                # ab_docs_floor: a purged tombstone raises the root's floor
+                # to its own position; a live row to the deleting transaction
+                floors = self.db.setdefault("_doc_floors", {})
+                deleting = None
+                for r in rows:
+                    if self._match(r):
+                        if r.get("deleted"):
+                            key = (r.get("txid", 0), r.get("seq", 0))
+                        else:
+                            deleting = deleting or _write_xid(self.db)
+                            key = (deleting, 1)
+                        if key > floors.get(r["root"], (-1, -1)):
+                            floors[r["root"]] = key
             rows[:] = keep
             return FakeResult([{"deleted": gone}])
         out = [r for r in rows if self._match(r)]
@@ -217,6 +285,9 @@ class FakeQuery:
             lo, hi = self._range
             out = out[lo:hi + 1]
         out = copy.deepcopy(out)
+        for row in out:
+            if "txid" in row:      # PostgREST renders xid8 as a JSON string
+                row["txid"] = str(row["txid"])
         if "source_bytes" in self._cols:
             for row in out:
                 if "source_bytes" in row:
@@ -250,10 +321,26 @@ class FakeBucketApi:
         with self._lock:
             return self.objects[key]
 
-    def list(self, parent):
+    def list(self, parent, options=None):
+        """Storage's folder listing: direct objects (with an id) and
+        sub-folders (id None), sorted by name, a name-prefix ``search``
+        (case-insensitive), and pages of ``limit`` (default 100)."""
+        options = options or {}
+        limit, offset = int(options.get("limit", 100)), int(options.get("offset", 0))
+        search = str(options.get("search", "")).lower()
         with self._lock:
-            return [{"name": key.rpartition("/")[2], "metadata": {"size": len(data)}}
-                    for key, data in self.objects.items() if key.rpartition("/")[0] == parent]
+            entries = {}
+            for key, data in self.objects.items():
+                if not key.startswith(parent + "/"):
+                    continue
+                name, _, rest = key[len(parent) + 1:].partition("/")
+                if rest:
+                    entries.setdefault(name, {"name": name, "id": None, "metadata": None})
+                else:
+                    entries[name] = {"name": name, "id": str(uuid5(NAMESPACE_URL, key)),
+                                     "metadata": {"size": len(data)}}
+            rows = [entries[n] for n in sorted(entries) if n.lower().startswith(search)]
+            return copy.deepcopy(rows[offset:offset + limit])
 
     def remove(self, keys):
         with self._lock:
@@ -324,7 +411,71 @@ class FakeClient:
         params = _wire_json(params or {})
         return FakeExec(evaluate=lambda: self._rpc_locked(fn, params), lock=self.lock)
 
+    def begin_transaction(self):
+        """A writer transaction left in flight (P7 tests): it holds the
+        feeds' frontier until finish_transaction commits or abandons it."""
+        with self.lock:
+            self.db["_xid"] = xid = self.db.get("_xid", _FIRST_XID) + 1
+            self.db.setdefault("_held", []).append(xid)
+            return xid
+
+    def finish_transaction(self, xid, write=None):
+        """Commit the held transaction: rows ``write()`` makes carry its id,
+        below every transaction that committed while it was held."""
+        with self.lock:
+            try:
+                if write is not None:
+                    self.db["_force_xid"] = xid
+                    write()
+            finally:
+                self.db.pop("_force_xid", None)
+                self.db["_held"].remove(xid)
+
+    def _feed_rpc_locked(self, fn, params):
+        """ab_feeds_frontier / ab_docs_feed / ab_logs_feed, as in
+        docs/supabase_schema.sql (P7)."""
+        if self.db.get("_legacy") or not self.db.get("_feeds", True):
+            raise RuntimeError(
+                f"Could not find the function public.{fn} (PGRST202)")
+        root = params["p_root"]
+        frontier = _frontier(self.db)
+        epoch = self.db.get("_epoch", _FAKE_EPOCH)
+        if fn == "ab_feeds_frontier":
+            return {"frontier": frontier, "epoch": epoch}
+        docs = fn == "ab_docs_feed"
+        table, pos = ("ab_docs", "seq") if docs else ("ab_logs", "id")
+        after = (params["p_after_txid"], params["p_after_seq" if docs else "p_after_id"])
+        limit = params["p_limit"]
+        if (any(type(v) is not int or v < 0 for v in after)
+                or type(limit) is not int or not 1 <= limit <= 1000):
+            raise ValueError("invalid feed request (22023)")
+        too_old = after[0] > self.db.get("_xid", _FIRST_XID) + 1
+        floor = self.db.get("_doc_floors", {}).get(root) if docs else None
+        if floor is not None and after < floor:
+            too_old = True
+        rows = [] if too_old else sorted(
+            (r for r in self.db.get(table, [])
+             if r["root"] == root and r.get("txid", 0) < frontier
+             and (r.get("txid", 0), r[pos]) > after),
+            key=lambda r: (r.get("txid", 0), r[pos]))[:limit + 1]
+        more = len(rows) > limit
+        rows = rows[:limit]
+        if docs:
+            out = [{"path": r["path"], "data": copy.deepcopy(r["data"]),
+                    "deleted": bool(r.get("deleted")), "seq": r["seq"],
+                    "txid": r.get("txid", 0)} for r in rows]
+        else:
+            out = [{"id": r["id"], "chat_id": r["chat_id"],
+                    "log_name": r["log_name"], "txid": r.get("txid", 0)}
+                   for r in rows]
+        return {"rows": out, "has_more": more,
+                "next": ([rows[-1].get("txid", 0), rows[-1][pos]] if more
+                         else [frontier, 0]),
+                "frontier": frontier, "epoch": epoch, "too_old": too_old}
+
     def _rpc_locked(self, fn, params):
+        if fn in ("ab_feeds_frontier", "ab_docs_feed", "ab_logs_feed"):
+            return self._feed_rpc_locked(fn, params)
         if fn == "ab_list_logs":
             heads = {}
             for row in self.db.get("ab_logs", []):
@@ -783,7 +934,8 @@ class FakeClient:
             for line in lines:
                 self.db["_seq"] = self.db.get("_seq", 0) + 1
                 keep.append({"id": self.db["_seq"], "root": root,
-                             "chat_id": chat, "log_name": log, "line": line})
+                             "chat_id": chat, "log_name": log, "line": line,
+                             "txid": _write_xid(self.db)})
             rows[:] = keep
 
 

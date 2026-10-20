@@ -1,0 +1,38 @@
+{
+ "check": "apply of the one-copy-per-line section (unique index, then the skip trigger, then its rename), each followed by a rolled-back member acceptance",
+ "project": "AgentBridge Scratch (riagjoluhcwjvmfchbzl)",
+ "date": "2026-10-20",
+ "authority": "Aryan: \"fix the duplicate append bug now\" (2026-10-20); Scratch applies allowed since 2026-10-14",
+ "before": {"ab_logs_rows": 5, "duplicate_groups": 0, "triggers": ["ab_mutation_legacy_gate", "ab_order_log_id"]},
+ "applies": [
+  "log_line_once_20261020: the index-only first version of the section",
+  "log_line_once_skip_20261020: adds the trigger under its first name, ab_logs_skip_landed_line (fired before ab_mutation_legacy_gate)",
+  "log_line_once_rename_20261020: drops the first name; private.ab_omit_landed_line and its trigger exactly as at the end of docs/supabase_schema.sql"
+ ],
+ "acceptance_index_only": {
+  "method": "DO block as an authenticated member of root p7-feeds-http-20261018 (chat room), rolled back by its final exception",
+  "observed": {"first": "inserted", "replay": "23505", "other_line": "inserted", "same_line_other_log": "inserted", "member_reads_back": 1, "rows_in_tx": 3},
+  "residue_after_rollback": 0
+ },
+ "acceptance_first_trigger_name": {
+  "method": "DO block, rolled back: as postgres a chat acc-room whose only member is pokes-owner; then inserts as pokes-owner (chat member) and pokes-reader (root member, not in the chat)",
+  "observed": {
+   "trigger_order": ["ab_logs_skip_landed_line", "ab_mutation_legacy_gate", "ab_order_log_id"],
+   "owner_first": "inserted", "owner_replay": "no error", "owner_sees_copies": 1,
+   "owner_other_line": "inserted", "owner_same_line_other_log": "inserted",
+   "nonmember_identical": "42501", "nonmember_sees": 0, "rows_in_tx": 3
+  },
+  "lookup_plan_with_seqscan_off": "Index Scan using ab_logs_line_once on ab_logs l",
+  "residue_after_rollback": {"logs": 0, "docs": 0}
+ },
+ "acceptance_final": {
+  "method": "the same rolled-back schedule after the rename",
+  "observed": {
+   "before_insert_triggers": ["ab_mutation_legacy_gate", "ab_omit_landed_line", "ab_order_log_id"],
+   "old_function_gone": true,
+   "owner_replay": "no error", "owner_sees_copies": 1,
+   "nonmember_identical": "42501", "rows_in_tx": 2
+  }
+ },
+ "production": "applied 2026-10-20 on Aryan's go-ahead after a rolled-back experiment: 20261020-production-log-line-once-results.json"
+}

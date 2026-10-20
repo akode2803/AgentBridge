@@ -1,7 +1,9 @@
 """Auth endpoints: signup / login / logout / check_name + the V111 app lock.
 
 Signup returns the ONE-TIME recovery code (D5) — the frontend must show it
-before moving on. Login on a migrated v1 account upgrades it in place
+before moving on, then confirm it (recovery_code_saved). A typed sign-up keeps
+the code on this machine until that confirmation; login and recovery_code
+return it again meanwhile. Login on a migrated v1 account upgrades it in place
 (pbkdf2 -> scrypt, identity keys provisioned) and, when keys were just
 minted, returns that same one-time code.
 
@@ -24,7 +26,7 @@ from __future__ import annotations
 
 from ..mesh.accounts import valid_name
 from .context import GuiApp
-from .routing import authed
+from .routing import authed, authed_read
 
 __all__ = ["GET", "POST"]
 
@@ -66,6 +68,21 @@ def logout(app: GuiApp, req) -> dict:
     if (err := _locked(app)) is not None:
         return err
     return app.logout((req.data or {}).get("password") or "", include_binding=True)
+
+
+@authed_read
+def recovery_code(app: GuiApp, req, mesh) -> dict:
+    """A typed sign-up keeps its one-time code here until the user confirms
+    saving it, so a session restored before the code was seen shows it again
+    (once per process; sign-up/sign-in responses carry their own copy).
+    Null for everyone else."""
+    return {"ok": True, "recovery_code": app.recovery_code_offer(mesh)}
+
+
+@authed
+def recovery_code_saved(app: GuiApp, req, mesh) -> dict:
+    """The user confirmed the code shown to them; forget it on this machine."""
+    return {"ok": True, "released": mesh.accounts.recovery_code_saved()}
 
 
 def check_name(app: GuiApp, req) -> dict:
@@ -188,6 +205,8 @@ POST = {
     "/api/mesh/login": login,
     "/api/mesh/logout": logout,
     "/api/mesh/check_name": check_name,
+    "/api/mesh/recovery_code": recovery_code,
+    "/api/mesh/recovery_code_saved": recovery_code_saved,
     "/api/applock/unlock": applock_unlock,
     "/api/applock/activity": applock_activity,
     "/api/applock/lock": applock_lock,

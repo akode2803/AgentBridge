@@ -233,6 +233,27 @@ def advance(
     return _advance_suffix(materialized, envelopes, directory)[0]
 
 
+def apply_own(materialized: ChatSnapshot, envelopes: list[dict],
+              directory: Resolver) -> tuple[ChatSnapshot, frozenset[str]]:
+    """Apply envelopes an owner just minted on top of ``materialized``.
+
+    Unlike ``advance`` this applies them in the given order whatever their ns:
+    the owner's compare-and-swap, not wall clocks, orders them after the
+    materialization (another writer's clock may run ahead of this one). The
+    watermark moves strictly forward, past every applied envelope, so it also
+    versions the result and its readers never re-apply these events. Returns
+    the snapshot and the ids that changed it.
+    """
+    snap = ChatSnapshot.from_dict(materialized.to_dict())
+    applied = set()
+    for env in envelopes:
+        if _apply(snap, env, directory):
+            applied.add(env["id"])
+    snap.materialized_ns = max(materialized.materialized_ns + 1,
+                               *(int(env["ns"]) for env in envelopes))
+    return snap, frozenset(applied)
+
+
 def advance_with_outcomes(materialized: ChatSnapshot, envelopes: list[dict],
                           directory: Resolver, requested: tuple[InfoEventIdentity, ...]
                           ) -> InfoSuffixEvaluation:
@@ -498,6 +519,8 @@ def _apply(snap: ChatSnapshot, env: dict, d: Resolver) -> bool:
         snap.deleted = True
         for name in list(snap.members):
             _tenure_close(snap, name, ns)
+        # Only they may still read it, to see the deletion and clean up (D-018).
+        snap.final_members = sorted(snap.members)
         snap.members = {}  # nobody is a member of a dead chat (reads all stop)
         return True
 

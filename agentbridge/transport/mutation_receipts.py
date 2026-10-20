@@ -18,6 +18,7 @@ _RESULT_FIELDS = {
     "doc_put": ("path", "updated"),
     "doc_compare_put": ("path", "applied"),
     "reaction_pair": ("chat_id", "username", "applied"),
+    "meta_append": ("chat_id", "log_name", "applied"),
     "doc_create": ("path", "created"),
     "doc_delete": ("path", "deleted"),
     "log_append": ("chat_id", "log_name", "row_id"),

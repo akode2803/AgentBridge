@@ -128,6 +128,32 @@ def test_attachment_leg_limit_rejects_before_local_outbox_commit_and_cancels_spo
     assert ann.messages_for(CHAT) == []
 
 
+@pytest.mark.parametrize("direct_commit", [False, True])
+def test_duplicate_attachment_rejects_before_local_outbox_commit_and_cancels_spool(
+        world, monkeypatch, direct_commit):
+    ann = world["ann"]
+    prepared = ann.prepare_attachment(CHAT, "twice.txt", b"one blob")
+    other = ann.prepare_attachment(CHAT, "other.txt", b"another blob")
+    spools = [ann.attachments.root / item.record["id"] for item in (prepared, other)]
+    assert all(spool.is_file() for spool in spools)
+    monkeypatch.setattr(
+        ann.store, "cache_and_outbox_add",
+        lambda *_args, **_kwargs: pytest.fail("duplicate attachment reached outbox"))
+    batch = [prepared, other, prepared]
+
+    with pytest.raises(ValidationError, match="more than once"):
+        if direct_commit:
+            ann.messaging.commit_envelope(
+                CHAT, ann.messaging.build_event(CHAT, {"type": "renamed"}),
+                attachments=batch)
+        else:
+            ann.post(CHAT, "twice", attachments=batch)
+
+    assert not any(spool.exists() for spool in spools)
+    assert ann.store.outbox_counts() == {}
+    assert ann.messages_for(CHAT) == []
+
+
 def test_attachment_cleanup_failure_does_not_block_local_append_settlement(
         world, monkeypatch):
     ann = world['ann']
@@ -193,7 +219,12 @@ def test_attachment_retry_reuses_manifest_after_upload_then_append_failure(
     assert not (ann.attachments.root / blob_id).exists()
 
 
-def test_crash_after_append_retries_same_ids_and_projects_once(world, monkeypatch):
+@pytest.mark.parametrize("line_index", [True, False])
+def test_crash_after_append_retries_same_ids_and_projects_once(
+        world, monkeypatch, clouds, tmp_path, line_index):
+    """The skip trigger drops the replay; a schema without it (and without
+    ab_logs_line_once) keeps two copies, which readers project once."""
+    clouds.client(tmp_path / "mesh2").db["_no_log_line_index"] = not line_index
     ann, bob = world["ann"], world["bob"]
     prepared = ann.prepare_attachment(CHAT, "acked.txt", b"ack boundary")
     blob_id = prepared.record["id"]
@@ -213,7 +244,7 @@ def test_crash_after_append_retries_same_ids_and_projects_once(world, monkeypatc
     bob.sync.sync_once([CHAT])
     assert [m.id for m in bob.messages_for(CHAT)] == [env.id]
     records, _ = ann.tx.read_log(CHAT, "ann@mach1", 0)
-    assert [r["id"] for r in records] == [env.id, env.id]
+    assert [r["id"] for r in records] == [env.id] * (1 if line_index else 2)
     assert not (ann.attachments.root / blob_id).exists()
 
 

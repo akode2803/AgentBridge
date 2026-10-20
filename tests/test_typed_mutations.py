@@ -36,6 +36,11 @@ CASES = [
                        "p_object_id": OBJECT, "p_sealed_bytes": 4096,
                        "p_sealed_sha256": "a" * 64,
                        "p_manifest_digest": "b" * 64}, {}),
+    ("meta_append", {"p_chat": "room", "p_data": {"members": {}},
+                     "p_expected_source_epoch": OBJECT, "p_expected_seq": 2,
+                     "p_expected_deleted": False, "p_log": "alice|m1",
+                     "p_records": [{"id": "e1", "ns": 1}, {"id": "e2", "ns": 2}]},
+     {"applied": True}),
     ("doc_compare_put", {"p_path": "accounts/alice.json", "p_data": {"v": 1},
                          "p_expected_source_epoch": OBJECT, "p_expected_seq": 3,
                          "p_expected_deleted": False}, {"applied": True}),
@@ -674,4 +679,46 @@ def test_reaction_pair_conflict_is_exact_and_payloads_versions_bind_digest():
                          ("p_expected_state_seq", 2), ("p_expected_reaction_seq", 2),
                          ("p_expected_state_deleted", True), ("p_user", "bob")]:
         changed = prepare_mutation("team", EPOCH, OP, ACTOR, kind, {**args, field: value})
+        assert changed.expectation.client_digest != request.expectation.client_digest
+
+
+def _meta_append_args():
+    (args,) = [args for kind, args, _ in CASES if kind == "meta_append"]
+    return args
+
+
+@pytest.mark.parametrize("field,value", [
+    ("p_chat", "room/other"), ("p_log", "../alice"), ("p_data", []),
+    ("p_expected_seq", 0), ("p_expected_seq", True), ("p_expected_deleted", 1),
+    ("p_expected_deleted", True),
+    ("p_records", []), ("p_records", {"id": "e1"}), ("p_records", [["e1"]]),
+    ("p_records", [{"id": "e"}] * 257), ("p_expected_source_epoch", "invalid"),
+])
+def test_meta_append_rejects_creates_bad_paths_and_records(field, value):
+    with pytest.raises(ValueError):
+        prepare_mutation("team", EPOCH, OP, ACTOR, "meta_append",
+                         {**_meta_append_args(), field: value})
+
+
+def test_meta_append_combined_provider_budget_counts_log_escaping(monkeypatch):
+    import agentbridge.transport.typed_mutations as module
+    monkeypatch.setattr(module, "_MAX_JSON_BYTES", 60)
+    args = {**_meta_append_args(), "p_data": {"m": "a" * 8},
+            "p_records": [{"r": "b" * 8}, {"r": "c" * 8}]}
+    # 17 bytes of meta plus two records of 17 bytes, each stored as JSON text
+    # and sized JSON-encoded again (4 escaped quotes + 2: 23 bytes), exceed 60.
+    with pytest.raises(ValueError, match="meta append exceeds provider limit"):
+        prepare_mutation("team", EPOCH, OP, ACTOR, "meta_append", args)
+    prepare_mutation("team", EPOCH, OP, ACTOR, "meta_append",
+                     {**args, "p_records": [{"r": "b" * 8}]})
+
+
+def test_meta_append_digest_binds_every_record_and_their_order():
+    args = _meta_append_args()
+    request = prepare_mutation("team", EPOCH, OP, ACTOR, "meta_append", args)
+    assert request.expectation.targets == (("chat_id", "room"), ("log_name", "alice|m1"))
+    for change in ({"p_records": args["p_records"][::-1]},
+                   {"p_records": args["p_records"][:1]}, {"p_log": "alice|m2"},
+                   {"p_data": {"members": {"bob": {}}}}, {"p_expected_seq": 3}):
+        changed = prepare_mutation("team", EPOCH, OP, ACTOR, "meta_append", {**args, **change})
         assert changed.expectation.client_digest != request.expectation.client_digest

@@ -9,7 +9,7 @@ from agentbridge.transport.typed_mutations import TypedMutationRPCError
 world = cases.world
 
 
-def test_full_rejection_then_rotation_strands_attempted_ticket(world):
+def test_full_rejection_then_rotation_releases_the_unexecuted_ticket(world):
     journal = world[-1]
     journal._adopt_epoch(_epoch())
     ticket = journal.allocate_ticket(
@@ -26,6 +26,10 @@ def test_full_rejection_then_rotation_strands_attempted_ticket(world):
         JournaledMutations(journal, rpc).resume(ticket.protocol_epoch, ticket.operation_id)
     assert journal.get_ticket(ticket).state == "attempted"
     assert journal.get_ticket(ticket).receipt is None
-    with pytest.raises(local_source.SourceChanged, match="unresolved_epoch"):
-        journal._adopt_epoch(_epoch(1, NEXT))
-    assert journal.get_ticket(ticket).state == "attempted"
+    # Option B: rotation required every receipt to be acknowledged, and this
+    # journal acknowledges only receipts it retains, so the rejected attempt
+    # provably never executed. It is released instead of stranded.
+    journal._adopt_epoch(_epoch(1, NEXT))
+    with pytest.raises(local_source.SourceChanged, match="missing"):
+        journal.get_ticket(ticket)
+    assert journal.pending_keys() == ()

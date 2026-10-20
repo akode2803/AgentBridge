@@ -11,6 +11,652 @@
 
 ## Active, partial, and deferred requirements
 
+### Aryan's asks, 2026-10-20 (live test of v0.24.380)
+
+- [x] **Unblock this Mac's writes** (Aryan: "yes please, option 1"). Done
+  2026-10-20: stopped the app and agent worker; moved (not deleted) the
+  coordinator, the registered store (755 MB) and the registered node
+  replica to `~/.agentbridge/backups/write-unblock-20261020T101232Z`; restarted both. The new store rebuilt in ~14 s
+  (5.7 MB), both files pass `quick_check`, 0 pending intents, and this
+  machine's writes reach production again (presence, chat overlays and
+  machines rows at 10:12–10:17 UTC, stamped with txid). The old outbox's
+  8 rows never reached the cloud (checked by message id; a control id
+  was found): 4 from August test rooms (r123/r127) and 4 real messages
+  (Oct 12 18:03–18:05 UTC in three chats; today 09:40 UTC).
+- [x] **Re-send the 4 stranded messages** (Aryan: "lets resend all the
+  unsent messages"). Done 2026-10-20 13:10 UTC: the original signed
+  envelopes (ids and timestamps unchanged) were re-queued into the live
+  store with the app's own `Store.cache_and_outbox_add`, after re-checking
+  that none was in the cloud or the live store; the app sent all 4 on its
+  first outbox pass (rows 101364–101372). Their chats had nothing newer
+  than Oct 8, so they land as each chat's latest messages. The app and
+  agent worker had been closed during the disk cleanup; both restarted.
+  The August test-room items were not re-sent: r123 is fully tombstoned
+  (its "created" event would revive it) and r127's two messages plus
+  delete event were test scaffolding (see the next item).
+- [x] **Leftover test room r127 in production**: its `chat_deleted` event
+  sat in the old outbox since 2026-08-08, so 7 live docs remained
+  (`chats/r127-live-1786185487344997000-g7f32264eaecc7e24/`: meta, key,
+  runtime events; no log rows; meta had no members). Purged 2026-10-20 on
+  Aryan's go-ahead the way `SupabaseTransport.delete_chat` does it: all 7
+  docs set `deleted=true, data={}` (r123's state).
+- [x] **A retried log append can land twice** (Aryan: "fix the duplicate
+  append bug now"). v0.24.381: the `ab_omit_landed_line` trigger
+  skips a line already in its log (old clients never see an error), the
+  `ab_logs_line_once` index backs it, and `append_log` accepts a 23505
+  once the identical line reads back; applied and accepted on Scratch.
+  Production applied 2026-10-20 on Aryan's go-ahead ("yes, apply it to
+  production"): `20261020143429 log_line_once_20261020`, 7 remaining
+  copies removed, rolled-back member experiment first (evidence
+  `docs/provider-mutation-acceptance/20261020-production-log-line-once-results.json`).
+  Live-verified 2026-10-20 14:49 UTC: Aryan's first send after the apply
+  landed once (row 101381, txid set; local status sent, outbox empty). Found 2026-10-20 re-sending
+  the stranded messages): `m-1791828234328246000-978c6c91` is in
+  production `ab_logs` twice (rows 101364/101366, consecutive txids
+  415198/415199, byte-identical) from ONE outbox attempt that took 936 ms
+  (the other three took ~250 ms). `SupabaseTransport.append_log` is a
+  plain insert and `_retry` replays it after an inline-retryable error
+  (`offline`/`service_error`, 0.4 s wait), so an insert that committed
+  but lost its reply is written again. Readers dedupe by `(chat_id, id)`
+  (the app showed it once), so nothing visible broke. Fix: make the
+  append idempotent (per-log uniqueness on the envelope id, with an
+  identical existing row accepted as the lost-reply retry, as
+  `create_doc` does) or never replay inserts inline. The duplicate row
+  101366 was deleted 2026-10-20 on Aryan's go-ahead (guarded on 101364
+  holding the identical line); the delete-scope trigger moved the log
+  head back to 101364 and emitted the root visibility event.
+- [ ] **Windows CI flakes one timing test per run** (found 2026-10-20 on
+  PR #146): about half the `test (windows-latest)` runs fail exactly one
+  test, a different one each time, each a GUI or fixture deadline (10 s
+  `GUI fixture HTTP timeout`) while another thread sits in a SQLite commit
+  (`mutation_coordinator._transaction`): test_gui_runtime signup (run
+  39442961230, BACKLOG-only commit eaeb65f; 529af68 with identical code
+  passed), test_gui_message_info_session (39438293640),
+  test_local_node_page_owner (39429949063, a BACKLOG-only commit),
+  test_gui_endpoints create-agent (39402645094, before 2026-10-20's work).
+  The runs take 60–72 min. Find why Windows commits stall (synchronous=
+  FULL outbox commits on the runner's disk?) rather than raise deadlines.
+- [x] **Disk nearly full on this Mac** (found 2026-10-20 during the
+  restart: 110 MB free of 228 GB; the shell failed with ENOSPC). Freed
+  1.9 GB of this session's pytest temp folders and 1.5 GB of unused uv
+  cache: 5.6 GB free. A full disk also leaked write intents (an outbox
+  row's last error was `disk I/O error`). Aryan then freed ~50 GB (63 GB
+  free, 2026-10-20). The write-unblock backup (732 MB) was moved to the
+  macOS Trash on Aryan's go-ahead (permanent deletion is his to do:
+  emptying the Trash).
+- [ ] **Next round: resolve failed write intents instead of keeping them
+  forever** (Aryan: "option 3 next round"): a write whose provider call
+  failed re-reads its paths from the cloud and then clears its intent, so
+  no install ever reaches `pending_mutation_budget` again.
+- [ ] **Friendly error for a blocked write** (Aryan: "format the
+  'pending_mutation_budget' error toast properly, since the app is meant
+  for power and casual users alike, or handle it whatever way you feel
+  best"): plain words for casual users, the detail for power users
+  (diagnostics), and recovery where the app can do it itself.
+- [ ] **"Chat is not ready yet" screen still shows** (Aryan: "Astra was
+  unable to fully clear" it; "DO NOT REMOVE the screen itself yet, it
+  helps catch errors"; his reading: "the app does not serve cache while
+  the latest changes are fetched from cloud"). Serve the cached chat while
+  the fetch runs; keep the screen for real failures
+  (`gui/static/js/chat.js` "Chat is not ready yet."). Take up when
+  suitable.
+- [ ] **Change ledger decision** (Aryan is reviewing
+  docs/CHANGE_LEDGER_DISCUSSION.md; "so far I agree with your
+  recommendation"): wait for his final call; tell him if any work is
+  blocked on it.
+- [ ] **Architecture discussion after the above** (Aryan): agent
+  permissions, chat history on join, image preview loading.
+
+### Typed-writer migration ledger (Claude Opus takeover, 2026-10-13/14)
+
+Rule (Aryan, 2026-10-14): every deferred task and decision lands here the
+moment it is made, so a large task list never lives only in conversation.
+
+- [x] **Option B: admission optional per owner** (Aryan, 2026-10-13). Single-leg
+  writes skip admission; closure + durable-receipt-before-ACK proves ticketed
+  unreceipted attempts unexecuted. `394bebe`/`b13ba66`; PostgreSQL gate and
+  full local suite passed. Rationale: docs/PROVIDER_ADMISSION_CHECKPOINT.md.
+- [x] **Human sign-up typed migration** (Aryan, 2026-10-14): `join`/`seed`
+  claim on a sealed root via typed `ab_mutation_member_claim` under a
+  deterministic key (root, account, username); every rerun replays it exactly
+  (no local journal ticket: the CLI owns none and an unacked receipt blocks
+  rotation). Bound `create_human` uses a `human_identity_create` owner
+  (account + self-signed bootstrap). Decision refinement: the recovery code
+  sits in the owner payload until publication, then in the keystore holder
+  (an admitted owner would block epoch adoption) until the GUI confirms it was
+  saved; sign-in and restored sessions re-show it. Owner deletes now use
+  `secure_delete` + WAL truncation (reaped payloads were readable before).
+  Rationale/evidence: docs/PROVIDER_ADMISSION_CHECKPOINT.md "Human sign-up".
+- [x] **Codex review sweep, 2026-10-14** (rule: read Codex PR comments before
+  every round close). Fixed this round, each with a regression test that fails
+  without the fix: #146 4260628805 (P1: identity creation is serialized per
+  name, agent and human, by `KeyStore.creating` — thread RLock plus a
+  cross-process `.create-<name>.lock`), 4260628817 (dispatcher `abandon`
+  removes the exact never-published key, and the journal refuses to drop
+  private material it was not shown), 4260628829 (the canonical-chain walk is
+  bounded by the subject's listed records, not 256 hops); #145 4259098040
+  (`save`, `forget` and recovery-code release take the reentrant cross-process
+  install lock; install also verifies its published inode), 4259098049
+  (duplicate attachment blob IDs are rejected before enqueue and the spools
+  cancelled). Already resolved: #146 4259225793
+  (`225ee5b`; under Option B an unadmitted claim spends a slot only when a
+  membership commits, so it is bounded like any member's writes), earlier
+  #145/#144/#143/#142/#140 rounds, #133 (last review clean). Codex hit its
+  quota after #146 15:28Z, so `394bebe` onward is unreviewed by Codex.
+  Codex reviewed again 2026-10-16 (`f73df55`): #146 4292560884 (P2, a
+  keyless newcomer lost history because the rewrap row finished anyway)
+  fixed in `51de59f` with a regression test; thread resolved.
+- [D] **#145 4259098058 stable append ID across typed owners**: unreachable
+  today (every `commit_envelope` caller mints a fresh envelope ID; messages are
+  PK-guarded in `local_send_status`); revisit if any caller re-commits one.
+- [ ] **#135 PostgreSQL gate coverage**: probe `ab_mutation_protocol_ready()`
+  under a bounded `statement_timeout`; a REPEATABLE READ writer against the
+  seal; seed legacy roots before installing the protocol (backfill); reject
+  seal replays with a different seal ID or plan digest. CI validates the gate.
+- [ ] **Watch: Windows WinError 10053 on rejected node POSTs** (Aryan asked
+  about #142's red Windows job, 2026-10-14). #142-#144 predate the
+  `_discard_rejected_body` fix (`12325b4`, on #145+), so the flake is expected
+  there and is cured by consolidating the stack. Remaining risk: `http.client`
+  sends headers and body in separate writes, so Nagle plus Windows delayed ACK
+  can hold the body longer than the 100 ms discard window; widen it (still
+  bounded by the 2 s socket timeout) if the error recurs on #145 or later.
+  Separate flake (2026-10-14, #146 on docs-only `36a70b6`):
+  `test_manager_retained_agent_tool_returns_once_without_room_post` missed
+  its 10 s claim wait on an overloaded Windows runner (no thread raised; the
+  previous run passed). Its waits are now 30 s (`a00a531`).
+- [x] **Supabase connector** (connected 2026-10-14 after Aryan restarted the
+  app): lists both projects. Aryan allowed applying schema to Scratch freely
+  (2026-10-14). Scratch now carries the branch protocol through
+  `agentbridge_p1b_meta_append_rpc` plus a Scratch-only prerequisite (the
+  `ab_docs_touch` version trigger its scaffold lacked); evidence and exact
+  SQL: docs/provider-mutation-acceptance/20261014*. Never production; never
+  the destructive gate.
+- [ ] **Decisions log** (Aryan, 2026-10-14): DECISIONS.md lists every choice
+  that may need revisiting with the path taken; update it as decisions land.
+- [ ] **Provider-side membership authority** (DECISIONS.md D-014, found
+  2026-10-14): any current member may replace `meta.json` (plain RLS and typed
+  `doc_put`/`doc_compare_put`), so admin rules hold only for honest clients.
+  Pre-existing; fix before untrusted members: a typed membership RPC that
+  validates the member/role diff against the old meta in SQL.
+- [x] **Refused typed operations stay pending** (DECISIONS.md D-016, 2026-10-14):
+  a provider error reply leaves the op `attempted` until epoch closure.
+  Recovery sweeps now skip one that still cannot settle and finish the rest
+  (`settle_exact_creates(skip_failures=True)` in `ChatKeyService.recover`;
+  `MembershipService.recover` is per row); per-chat paths stay fail-closed.
+  A refused key-epoch create replays harmlessly (fresh ns epoch numbers).
+- [D] **`revoke` under a seal** (2026-10-14): refuses before any change;
+  eviction needs a typed operator flow (and the key-rotation owner). Until
+  then, deleting the auth user in the dashboard locks the account out once
+  its access token expires; the `ab_members` row stays (DECISIONS.md D-013).
+- [ ] **Bound migrated-account login upgrade**: `upgrade_login` (pbkdf2 →
+  scrypt, keys minted for a keyless v1 account) still refuses under a bound
+  writer; it needs the human identity owner's material path.
+- [D] **Fold `join` into in-app sign-up** (Aryan, 2026-10-14): deferred to the
+  setup/account overhaul, which also retires `legacy/bridge.py`.
+- [x] **Chat-key rotation owner** (Aryan, 2026-10-14; inactive, deterministic
+  tests). Bound `rotate`/`on_member_left` publish one exact create per epoch
+  (wraps retained before dispatch; an earlier lost epoch settles exactly and is
+  reused before another is minted); history re-wrap is one CAS per epoch,
+  driven by a Store row (`key_rewraps`) bound to each newcomer's `joined_ns`,
+  so a crash resumes without re-wrapping and nobody who left (or was re-added)
+  gets more history. A per-process overlay stops mirror lag from re-rotating;
+  rotations in a process are serialized. `ChatKeyService.recover()` finishes
+  interrupted work. Limits: the rewrap row is written after the add events are
+  queued (a crash between loses history for the newcomer, never leaks it);
+  legacy meta without `joined_ns` gets no typed history re-wrap. Reachable only
+  once the membership owner below lands. Evidence: tests/test_chat_key_owner.py.
+- [x] **Membership genesis/materialization owner** (Aryan, 2026-10-14;
+  inactive, deterministic tests). Meta first under a bound writer: each action
+  (add/remove members, grant/revoke admin, rename, description, permissions,
+  clear avatar) is one `meta.json` CAS whose build re-checks authority on the
+  fresh provider meta and applies the newly signed events on top in swap
+  order; the events are appended in the same provider transaction (the meta
+  append, D-017, which replaced the first swap-then-outbox version), with a
+  `membership_actions` Store row keyed to the exact attempt (ticket held until
+  the row is consumed). Genesis is an exact create; written meta is served
+  until the mirror shows it. `MembershipService.recover()` finishes
+  interrupted actions and their key steps. Unbound path unchanged.
+  Independent Claude review findings all fixed (the Lamport floor it
+  criticised was dropped). Design/limits: docs/PROVIDER_ADMISSION_CHECKPOINT.md
+  "Membership owner"; DECISIONS.md D-014/D-015. Evidence:
+  tests/test_membership_owner.py (20 mutants, each killed).
+- [ ] **Avatar uploads under a bound writer**: `put_blob` raises when bound, so
+  group photos (`set_avatar`, refused before any event) and profile photos
+  (`accounts.py`) need a typed blob path like attachments' manifest.
+- [x] **Terminal flows under a bound writer** (Aryan, 2026-10-14; inactive,
+  deterministic tests plus hosted Scratch acceptance). New RPC
+  `ab_mutation_meta_append` (meta swap plus the actor's events in one
+  transaction, pre-swap authority) now carries every typed membership action
+  except genesis, which lets a leaver or a deleting admin record the event
+  that ends their access. Leave (groups only, agents cascade first) and
+  delete-for-everyone (admins) first deliver this device's queued sends to
+  the chat, refusing while any remain; no leaver-minted rotation; attachments
+  wait for the janitor. Delete agent/account treat an already-gone membership
+  as done. The RPC compares the version before membership, so an action
+  that lost a race to its own removal or the group's deletion gets
+  `applied=false` (for anyone in tenure) and settles. A refused action keeps
+  its Store row until a receipt or closure (an earlier draft dropped it and
+  wedged the chat); the outbox cycle sweeps them (`MembershipService.sweep`:
+  per-row 60 s backoff, never waits for a running action, at most 16 settles,
+  never raises). Leave/delete settle the chat's earlier actions before
+  draining every queued send of mine (any device log, even in backoff); a
+  retried leave or delete whose earlier attempt applied is done. A journal
+  overlap with an in-flight send reads "this chat is busy". Two independent
+  Claude reviews (design, then implementation) found two chat-wedging HIGHs
+  and smaller gaps, all fixed with tests. DECISIONS.md D-016..D-018.
+  Evidence: tests/test_membership_owner.py (34 mutants, each killed),
+  docs/provider-mutation-acceptance/20261014061026-*, 20261014064104-* and
+  (uniform answer to former members) 20261014103831-*.
+- [ ] **Release completed meta-append tickets without a row** (review,
+  2026-10-14): a crash after `commit_action` consumed the Store row but
+  before `release_operation` leaves that acknowledged operation held until
+  an epoch rotation (the chat is not blocked). Recovery could release
+  completed `meta_append` operations that have no row.
+- [ ] **Typed outbox: refused appends retry forever** (review, 2026-10-14):
+  `_dispatch_typed` treats every provider refusal as transient. After a leave,
+  removal or delete, a send queued by another thread between the drain and
+  the swap, another member's queued sends, a manifest leg, or (rarely) a
+  genesis append whose creator was removed first, keep retrying with the
+  clock icon; a row that can never be delivered also blocks that chat's
+  leave (and so account deletion) with "still sending". Dead-letter
+  ticketless rows on a membership refusal and mark `local_send_status`
+  failed; consider a "discard unsent" choice in the leave dialog.
+- [x] **Janitor and blob deletion under a bound writer** (review, 2026-10-14;
+  inactive, deterministic tests plus hosted Scratch acceptance). The
+  delete-for-everyone fold records `final_members`; only they read, clean
+  and purge a deleted room (D-018; older deletions fall back to tenure). The
+  deleting member reclaims the chat's own Storage folders (`chats/<chat>/`,
+  `blob-stage/<chat>/`, listed page by page) right after the swap, a failure
+  only logs. Deletes are batched (100 keys a Storage call, no per-object
+  lookup); bound, they are direct, identity-checked Storage removes limited
+  to the chat's own folders (Storage is outside the seal). The janitor lists
+  the three known folders by name, purges only once a fresh listing is
+  empty and, when bound, the provider meta is terminal, via a `chat_delete`
+  under a fresh key; each sweep first settles a purge whose reply was lost
+  (else its unacknowledged receipt would hold every rotation). `doc_delete`
+  never tombstones a chat meta. A purged room answers every root member
+  alike. Storage listings now page past 100 names (`_strict_blob_size` had
+  silently missed later files) and a 0-byte object counts as present. A
+  transport that cannot list never purges. Kept: the janitor's ns-ordered
+  refold still gates purging (it fails closed; see the open item below).
+  Evidence: tests/test_janitor.py, test_membership*.py,
+  test_staged_attachments.py, test_supabase_transport.py,
+  test_application_mutations.py (27 mutants, each killed),
+  docs/provider-mutation-acceptance/20261014111654-* and (review fixes)
+  20261014114329-*.
+- [x] **Hosted Storage listing check** (review, 2026-10-14): the purge is
+  irreversible and is decided by an empty listing, but only SQL policies
+  were accepted on Scratch, not the Storage list/remove HTTP API. Run
+  `devtools/validate_blob_storage_http.py`-style checks as a final member:
+  more than 100 files, `files/` and an unexpected sub-folder, batched
+  remove. Needs an authenticated Scratch test session (Aryan's; Claude does
+  not create accounts). The janitor already lists its three folders by
+  name, so a Storage that hides sub-folder rows only misses unexpected ones.
+  Confirmed 2026-10-14: the Supabase connector has no Storage object tools
+  (its optional storage group only lists buckets and edits their config).
+  Steps for Aryan: create two auto-confirmed users in Scratch's dashboard,
+  put the six `AGENTBRIDGE_SCRATCH_*` values in a mode-600 file outside the
+  repo (`docs/provider-mutation-acceptance/20261013081948-http-notes.md`),
+  then run one command; Claude adds a `listing` mode to
+  `devtools/validate_blob_storage_http.py` and sets up the root by SQL. The
+  database half passed on Scratch (2026-10-14, rolled back, residue 0). The
+  janitor's walk through `storage.search` under RLS found every object: 152
+  in a live room over 5 pages including nested folders, and 121 plus 3
+  staged objects for a deleted room's final member. A member who left
+  earlier and a root member outside the room saw none. Evidence:
+  docs/provider-mutation-acceptance/20261014-storage-listing-*. HTTP half
+  passed 2026-10-17 (Aryan ran it): with the production `list_blobs`, the
+  owner listed all 152 room objects (150 files, the avatar and a nested
+  unexpected folder) and the uploader 155 with its 3 staged; an exact-name
+  search found a file past the first page; removing RLS-hidden keys was an
+  empty success that changed nothing; batched removes reported [100, 52]
+  and [3]; both listings were empty after, and Scratch kept no objects.
+  Evidence: docs/provider-mutation-acceptance/20261017-storage-listing-http-results.json.
+- [ ] **Architecture comparison with Signal and Telegram** (Aryan,
+  2026-10-14): check that the architecture holds as users join without
+  another rewrite. Compare delivery and idempotency, multi-device state,
+  group authority (D-014), eviction and bans (D-013), ephemeral signals
+  (D-009), social-graph exposure (D-018) and leave/delete UX (D-019); list
+  each gap with the cost of closing it now versus later. Aryan's target
+  (2026-10-14): about 1,000 users on paid Supabase; simple, scalable,
+  secure, minimal latency; no third rewrite; decisions only after
+  discussion. Analysis written: docs/FOUNDATION_REVIEW.md (F1–F10, proposals
+  P1–P10, load model, Supabase quota maths); DECISIONS.md D-020. An
+  independent Claude review found 11 problems (a P6 hole, open sign-up, P1
+  gaps, root-wide scans and locks, cursor gaps, N² read marks, closure's
+  other roles, backups); each was verified in code and folded in. Open:
+  Aryan's decisions.
+- [~] **Usernames are reusable, and the next claimer inherits chat access**
+  (security, pre-existing, found by review 2026-10-14). Chat ACLs match
+  usernames in `meta.members`. `ab_mutation_member_claim` lets any signed-in
+  account claim an unclaimed name, and root-level `member_leave` deletes the
+  `ab_members` row. The next claimer then reads every chat that still lists
+  the name (including deleted rooms' `final_members`) and can rewrite its
+  meta. Fix (FOUNDATION_REVIEW P6): never free a name; mark the row revoked
+  and check that flag in `ab_member`, or key ACLs on uid. Aryan
+  (2026-10-17) asked for fixed identifiers so usernames can change and be
+  freed. R7 already splits the fixed `name` from the changeable `handle`;
+  the gap is that users choose `name` and the server frees it. Proposed:
+  never free `name` now (server only); with the sign-up overhaul, generate
+  `name` for new accounts and make the chosen username the handle. Agreed
+  by Aryan 2026-10-17. Wider than first found: agents never get an
+  `ab_members` row, so any login can claim an existing agent's name with no
+  one leaving. Design, revised after an independent review:
+  docs/NAME_RETENTION_AND_PRIVATE_POKES.md. Built in v0.24.378; Scratch
+  acceptance passed. Production read-only checks 2026-10-18
+  (docs/provider-mutation-acceptance/20261018-production-readonly-checks.json):
+  no claimable names; four human accounts (aryan1, aryanonavd, fable,
+  musk27aan) have no login row, so after the fix only the operator's `seed`
+  can give them one; production lacks the typed protocol, so the fix ships
+  as a standalone slice
+  (docs/provider-mutation-acceptance/20261018-production-name-retention-slice.sql).
+  Its rolled-back production experiment passed 2026-10-18: every Scratch
+  case answered the same, the real login's view of mesh2 was identical with
+  the slice in place, and nothing persisted
+  (…/20261018-production-name-retention-results.json). **Applied to
+  production 2026-10-18** on Aryan's go-ahead (migration
+  `name_retention_private_pokes_20261018`; triggers, poke policies and the
+  revoked filter verified; his login's view unchanged). The four human
+  accounts that use his login (aryan1, aryanonavd, fable, musk27aan) need
+  the operator's `seed` only if one ever gets its own login. Open: CI
+  Postgres gate, generated names and server-owned handles with the sign-up
+  overhaul.
+- [ ] **Handles are unique only by a client check** (found 2026-10-17):
+  `Directory.handle_taken` reads every `users/` doc (1,000 at the target)
+  and two accounts can race to the same @handle, which allows
+  impersonation. Claim handles on the server (a unique row) before handles
+  become the only visible username.
+- [~] **A chat joined mid-session misses its older docs** (found 2026-10-17,
+  confirmed by a probe against `CachingTransport`): the delta returns only
+  rows above the cursor, so a newly visible chat's older edits, deletions,
+  pins and reactions wait for the next full pull. Fix with a scoped
+  catch-up when a chat appears (logs already do this via `SyncEngine._known`).
+  Design (draft 2026-10-18, section C): docs/COMMIT_ORDERED_CURSORS.md.
+  Built in v0.24.379 (the mirror's `caught_up` set; one prefix read per
+  newly visible chat, also after this process appended to it). Unit-tested
+  and the hosted client check passed; ticks after production and a live
+  run.
+- [~] **Delta cursors can skip late commits** (correctness, pre-existing,
+  review 2026-10-14). `get_docs_delta` reads `seq > cursor` and logs
+  `id > cursor`, but both are assigned before commit, so a slower transaction
+  lands below a cursor a reader already passed and is missed until the 6 h
+  reconcile. Fix (P7): commit-ordered frontier via the row's transaction id
+  and `pg_snapshot_xmin`; it also replaces the change ledger's root-wide
+  exclusive page lock. Precision (2026-10-17): the 6 h full pull is a
+  per-process timer and covers docs only; a log the root-wide feed failed
+  to name heals on a restart or when its sender posts again. Corrected by
+  the review (2026-10-18): a row skipped inside one log never heals
+  (`sync_chat` skips a log whose head equals the offset; `read_log` reads
+  only `id > offset`). Aryan asked whether the full pull is needed at all: with P7, a
+  scoped catch-up on join and a "cursor too old" answer it becomes a rare
+  safety net (FOUNDATION_REVIEW F6). Design (2026-10-18, revised after an
+  independent review): docs/COMMIT_ORDERED_CURSORS.md: a transaction-id
+  frontier for the doc delta and the root-wide log feed, stored as one
+  integer; ids in one log follow commit order (the existing log-head lock,
+  taken before the id) so local offsets stay safe; a purge floor in its own
+  table plus the epoch for "too old"; keyset full pulls; reconcile 6 h →
+  24 h with a drift counter. The change ledger stays as is (its lock guards
+  the seal and node fences too). Aryan 2026-10-18: "build revised P7:
+  yes". Built in v0.24.379: schema (commit `150f6c8`; CI gate with real
+  sessions), client (feed cursors with a basis, "too old" handling, keyset
+  pulls, 24 h reconcile with drift). Scratch: applied, index scans
+  confirmed; Aryan's hosted client check passed 2026-10-18 (17/17;
+  docs/provider-mutation-acceptance/20261018-commit-ordered-feeds-http-results.json).
+  Independent review of the client 2026-10-20: eight findings, all fixed
+  in v0.24.380 (the design note's "Review of the build"); the member
+  delete policy now allows tombstones only and a live row's hard delete
+  raises the floor (Scratch applied). Production applied 2026-10-20 on
+  Aryan's go-ahead (migration `p7_commit_ordered_feeds_20261020`, after a
+  rolled-back experiment; all six function bodies match the slice;
+  docs/provider-mutation-acceptance/20261020-production-p7-results.json).
+  Open: a live run on production (Aryan testing v0.24.380),
+  `idle_in_transaction_session_timeout = 60s` per project.
+- [ ] **Decide whether to retire the change ledger with the node stack**
+  (review of P7, 2026-10-18): once docs and logs are commit-ordered, the
+  harness could take its scopes from the mirror delta and the log feed and
+  its wake from the private poke channel. The ledger costs a row, index
+  entry and WAL on every write, kept forever, plus Postgres Changes
+  authorization per event per subscriber (F2). Its root lock also serves
+  the seal, epoch pins and node fences, so retiring it means replacing
+  those. Discussion written 2026-10-18: docs/CHANGE_LEDGER_DISCUSSION.md
+  (keep / repair / retire; tied to the node and the agent-harness direction).
+- [ ] **Harness history index skips late or skewed messages** (review of
+  P7, 2026-10-18): `harness/retrieval.py` `ensure_indexed` keeps a
+  high-water mark on the sender's clock (`ns`), so a message that arrives
+  later with a smaller `ns` is never embedded. Not a commit-order issue;
+  fix with P7's second half (server order per chat) or by tracking indexed
+  message ids.
+- [x] **The `ab-<root>` poke channel is public** (review 2026-10-14): anyone
+  with the publishable key can send pokes that make every process pull. Make
+  it private now (Realtime authorization; "Allow public access" off), ahead
+  of P2's per-user topics. **Agreed by Aryan 2026-10-17.** Built in
+  v0.24.378 (policies, private join with the session token). Aryan's HTTP
+  check passed on Scratch 2026-10-17, before and after turning off "Allow
+  public access" (members hear each other; a non-member, a revoked member
+  and, once off, a public join are refused; a public listener never hears
+  private pokes). Evidence:
+  docs/provider-mutation-acceptance/20261017-private-pokes-http-results.json.
+  Production: policies applied 2026-10-18 with the name slice; this
+  machine's client (~/Documents/GitHub/AgentBridge) is v0.24.378. "Allow
+  public access" turned off on production by Aryan, 2026-10-18 (the
+  built-in browser would not take his sign-in; he used Chrome). Recorded
+  in the evidence file's `production_setting_after`. Production's
+  `realtime.messages` partitions ended at 2026-10-15, so the app's first
+  private join there fails once with MissingPartition and is retried.
+- [ ] **Root-wide work per delta tick** (review 2026-10-14): every tick runs
+  `list_chat_ids`, and `ab_chat_ids` scans the root's logs and chat docs,
+  so cost grows with total history. Replace it with membership changes on
+  the user's topic (P2 after P4).
+- [ ] **Open sign-up with the bootstrap** (review 2026-10-14; deliberate for
+  friends, SECURITY_RLS.md): anyone with URL, publishable key and root can
+  create unlimited accounts, defeating per-account limits. Before strangers
+  join: invite tokens checked in the claim RPC, per-root limits, optional
+  CAPTCHA (P9). Aryan (2026-10-17): this lands with the setup overhaul.
+  Setup picks a server: one's own new server (with instructions), or an
+  invite link, code or credentials file. Servers will later split into
+  private and public (public deferred: agents have local access). No
+  unnecessary email. Findings: synthetic addresses stay; anonymous sign-ins
+  lose the account on another device; the Before User Created hook (a
+  Postgres function) can require an invite (FOUNDATION_REVIEW F9).
+- [ ] **Backups and restore** (review 2026-10-14): a restore rewinds ids,
+  sequences and receipts under live clients. Add a root incarnation id that
+  feeds, cursors and resolve check (P10); decide before activation.
+- [ ] **Receipt epoch rotation** (activation blocker, found 2026-10-14):
+  every typed write holds one of 4,096 root-wide receipt slots until
+  `ab_admin_rotate_mutation_epoch`, which no API role may call (database
+  owner only) and which needs every receipt acknowledged. Nothing schedules
+  it, so a busy root stops writing ("epoch is full") within hours to days.
+  Decide who rotates and when, keep ephemeral traffic off receipts (D-009),
+  and handle the attempted-without-receipt case
+  (docs/PROVIDER_RECEIPT_CAPACITY_CHECKPOINT.md). Aryan (2026-10-14)
+  suggested pg_cron. Cron runs as the owner, so it can call the rotation,
+  but the rotation still fails while any client's receipt is
+  unacknowledged. At 1,000 users the pool lasts about an hour, and one
+  member can fill it alone; one receipt never acknowledged (a dead device)
+  blocks rotation forever. Proposed instead: receipts per (actor, device)
+  with a resolve fence, idempotent ack, time-ordered ids and 24 h retention
+  (docs/FOUNDATION_REVIEW.md F1/P1, which lists the six other jobs epoch
+  closure does today that each need a replacement).
+- [ ] **Root-wide wake-up channel** (found 2026-10-14,
+  docs/FOUNDATION_REVIEW.md F2): every write pokes `ab-<root>`, and every
+  process in the root pulls a delta, so Realtime messages and queries grow
+  roughly with users². Proposed: one private topic per user, with the server
+  fanning out to chat members (`realtime.send` from a trigger). Needed before
+  about 50 active users.
+- [ ] **Typing quota and removed members** (Aryan, 2026-10-14): he wants
+  the Realtime free-limit maths before choosing Realtime for typing, and
+  noted a removed member keeps seeing the room's typing (the client can
+  hide it). Calculated in docs/FOUNDATION_REVIEW.md F3: about 7.7 million
+  messages a month at 1,000 users (about $19 a month on Pro); server
+  fan-out at send time (P3) stops removed members at once.
+- [ ] **Server-side housekeeping via pg_cron** (Aryan, 2026-10-14): run
+  receipt purges, tombstone purges, purged chats' manifests and presence
+  expiry on the server instead of a client janitor. Storage folders go
+  through an Edge Function via `pg_net` (deleting `storage.objects` rows
+  orphans the files). docs/FOUNDATION_REVIEW.md F8/P8.
+- [ ] **Big groups ship O(members) docs to every member**
+  (docs/FOUNDATION_REVIEW.md F4, 2026-10-14): `meta.json`, each key-epoch
+  doc (one wrap per member, every epoch rewritten on a history add) and
+  read-state docs. Decide a group-size cap. For large groups: membership
+  rows and per-recipient wraps.
+- [ ] **Server-assigned chat order** (docs/FOUNDATION_REVIEW.md F6/P7,
+  2026-10-14): `ns` is the sender's clock. Decide now whether new cursors
+  use a per-chat server sequence; build later.
+- [ ] **Phone app and UI stack** (Aryan, 2026-10-15): React Native would have
+  suited the phone app goal; the no-dependency rule was taken too far.
+  Direction (FOUNDATION_REVIEW F11/P11, option D): TypeScript for every
+  human client and later the harness; React Native on phones; Tauri on
+  desktop (Linux is a must; Electron rejected for slow start-up). First: a
+  protocol spec with golden vectors, then a 2–3 week spike comparing
+  TypeScript + React Native/Tauri with Dart + Flutter (Aryan, 2026-10-15):
+  both ports pass the vectors; the same screen in both on macOS, Windows,
+  Linux and a phone; cold start, warm start and memory measured. 2026-10-16:
+  Flutter favoured (one Dart core; TS only for thin MCP tooling; adopt an
+  open harness over MCP), with stop rules in F11. Trap: `ns`
+  exceeds JS safe integers, so use BigInt.
+- [ ] **ARCHITECTURE.md is stale** (2026-10-14): §6 still describes the
+  folder transport, retired by docs/SUPABASE_ONLY_REMOVAL_PLAN.md.
+- [ ] **`status/` lanes leak chat activity to non-members** (pre-existing,
+  found 2026-10-14): any root member may read `status/typing_*` (chat id)
+  and `status/<agent>_live.json` (chat id plus tool-step activity lines),
+  although the GUI only shows a chat's own. Moving them to private per-chat
+  Realtime topics (D-009) fixes it; otherwise move the docs under
+  `chats/<id>/`.
+- [D] **Optimistic leave and delete** (Aryan, 2026-10-14): Aryan is deciding;
+  the suggested shape is in DECISIONS.md D-019.
+- [ ] **Derivable exact-create keys** (review, 2026-10-14; pre-existing,
+  accepted at this scale): `exact_create_id` is a uuid5 of the path, and
+  receipts are keyed across actors, so any root member can take another
+  member's key first and that member's create then fails (55000) until the
+  epoch changes. Purges moved to fresh keys for this reason. Fix: mix in
+  the actor id plus a per-journal secret.
+- [ ] **Janitor integration test under a bound writer** (review, 2026-10-14):
+  the bound pieces are unit-tested (batch route and path rule, publisher
+  remove, settle of lost purges) and the janitor runs over the real
+  Supabase transport unbound, but no test runs a real Janitor over a bound
+  `LocalMutationTransport`.
+- [ ] **Janitor refold can disagree with swap order** (review, 2026-10-14):
+  the janitor confirms a deletion by refolding events in ns order, which can
+  reject a delete that was valid in meta swap order (a clock-skewed earlier
+  removal). It fails closed: the room is never purged and its files stay
+  until someone deletes it again. Under typed, trust the provider meta
+  (`deleted`, `members == {}`) once a bound writer is the only writer.
+- [ ] **Pending refused write blocks this device's purge** (accepted limit,
+  2026-10-14): the journal's overlapping-intent check holds a device's
+  `chat_delete` while a refused write on the same chat is pending (D-016,
+  until epoch closure). Another final member's janitor can still purge, and
+  Storage reclaim is not blocked. Revisit with the dead-letter item above.
+- [ ] **Manifests outlive a purge** (2026-10-14): `ab_blob_manifests` rows
+  of a purged chat stay (`ab_mutation_chat_delete` drops logs and tombstones
+  docs only). Harmless (sizes and digests, no bytes, readable only through
+  the room's final members) but they accumulate; drop them in the purge once
+  it is clear no manifest receipt replay depends on them.
+- [ ] **Agent ownership transfer under a bound writer**: `_depart_owner_changed`
+  is skipped when bound (it ran with the owner's session, which the provider
+  refuses where the owner is not a member), and `_heal` runs only on
+  created/removed/left/revoked events, not on `apply_own`. A transferred agent
+  stays a member (and in the key wraps) of rooms its new owner is not in until
+  someone removes it. Fix: heal inside the meta append (with cascade pills) or
+  a typed departure by the agent's own session.
+- [ ] **Member-controlled `materialized_ns` overflow** (pre-existing): a meta
+  watermark of 2^63 or more makes `state_events_after` raise OverflowError.
+  `_snapshots` now skips that chat, but `_fresh` still raises, so nobody can
+  leave it. Validate or clamp on read.
+- [ ] **Unpublished staged attachments become orphans** (2026-10-14): an
+  object uploaded to `blob-stage/<chat>/` whose manifest never published (the
+  send was refused after a removal, or the sender gave up) is readable and
+  deletable only by its uploader while a current member, and no message
+  references it. In a deleted room the final members now reclaim every
+  object of the room's folders, so this remains only for live rooms: needs
+  an uploader-side sweep of its own unpublished objects (the outbox knows
+  the blob ids) before the membership ends, or a provider-side expiry.
+- [ ] **Typed tombstone purge** (2026-10-14): `purge_deleted_docs` (the
+  janitor's 30-day hard drop of tombstoned docs) raises under a bound writer;
+  needs a typed RPC or an operator job. Until then tombstones accumulate.
+- [ ] **Hardening: bind `p_log` to the actor** (review, 2026-10-14): meta
+  append and `log_append` accept any log name in a chat the actor is in.
+  Require the actor's own `<name>|` prefix in SQL.
+- [ ] **Hardening: `ab_docs_touch` search_path** (Scratch advisor,
+  2026-10-14): the clean-install trigger function has a mutable search_path;
+  pin it to `pg_catalog, public` in the schema.
+- [ ] **Local writes blocked: leaked mutation intents fill the budget**
+  (found live 2026-10-20 while starting v0.24.380 for Aryan's test; first
+  seen in launcher.log on 2026-10-13, before P7). Every local write
+  (`typing`, `delete_messages`, `clear_chat`, `archive`, `create_dm`)
+  fails with `SourceChanged('pending_mutation_budget')`:
+  `local_mutations._mutate` keeps a durable intent when the provider call
+  raises ("a later success cannot clear this older operation's ambiguous
+  outcome"), and `MutationCoordinator._insert_intent` refuses at
+  `MAX_PENDING = 64`. This Mac's coordinator
+  (`~/.agentbridge/local-input-owners/3d0f….sqlite`, last written
+  2026-10-13) holds 64 intents (2 quarantine sentinels; scopes: 61
+  `doc_exact`, 3 `log_chat`). So any 64 failed writes over an install's
+  life stop it writing for good. The only recovery tool, `quarantine`,
+  fences the affected paths forever. Needs: (1) a recovery decision for
+  this machine (Aryan's call: the registered store also holds 8 `outbox`
+  rows); (2) a design fix: an intent whose provider call failed must be
+  resolved, not kept forever, e.g. by re-reading the affected paths from
+  the provider (the cloud is the truth) and then clearing it.
+- [ ] **Hardening: production advisor warnings** (production security
+  advisor after the P7 apply, 2026-10-20; none from P7): mutable
+  search_path on `ab_chat_of`, `ab_list_logs`, `ab_docs_touch`,
+  `ab_root_ok`; `anon` may execute the definer helpers `ab_can_read_chat`,
+  `ab_is_member`, `ab_member` (each keys on the caller's login, so likely
+  harmless; not verified, revoke from `anon` anyway); leaked-password protection is off (an Auth
+  setting, Aryan's call). Fix in the schema, then one production slice.
+- [ ] **Message overlays under a bound writer**: edits, redactions (delete for
+  everyone) and pins use plain `put_doc`/`delete_doc` (mesh/overlays.py) and
+  raise when bound. Classify: edits/redactions are immutable-ish records,
+  pins a conditional set.
+- [ ] **Reserved read acknowledgement**: `page_read_ack` uses
+  `put_reserved_doc`, which raises under a bound writer; bind finalization
+  provenance and the exact ticket in one root-to-node-to-Store cut (RPC plan).
+- [ ] **Keyless agent adoption** (minting keys) needs an identity owner; bound
+  adoption refuses it today.
+- [ ] **Bound generic submits after lifecycle opt-in**: `put_doc`/`create_doc`/
+  `delete_doc`/effects/`append_log` via `ApplicationMutationWriter.submit`
+  refuse (`ticket_required`) until each writer's binding is recoverable.
+  Audit 2026-10-14: about 40 unguarded generic write sites (of 50 raw call
+  sites in 19 modules; the rest are legacy-only branches) raise when bound — beyond the items above: harness feed/peer/broker/controls/
+  permissions/eventio/runner, applink control, GUI typing status, janitor and
+  GUI chat delete, reaction/state reseal in mesh/service.py. Each needs a
+  class: immutable publication (`create_exact_doc`), replaceable snapshot
+  (`write_latest_doc`) or conditional update (`update_doc`/semantic action).
+  Ephemeral status (GUI typing, harness live feed) would spend receipt
+  capacity on every update (each typed write holds a receipt until epoch
+  rotation); decide whether it moves to Realtime broadcast/presence or another
+  non-receipt channel instead of the typed writer.
+- [ ] **Activation wiring**: nothing binds the typed writer in production yet.
+  At bind: drain pre-consumer outbox rows with the old owner (including any
+  legacy terminal leave/delete rows, which the typed handler refuses forever),
+  then run every recovery sweep (identity owners, `MembershipService.recover`
+  then `ChatKeyService.recover`, state actions, outbox owners, exact creates)
+  before serving writes. Gate binding on the provider having
+  `ab_mutation_meta_append`: a PGRST202 reply would hold a membership row's
+  strict settle forever.
+- [ ] **Fleet upgrade before seal** (operational): the seal blocks legacy
+  writes for every role, so all GUIs and workers on every machine must run the
+  typed build before the root is sealed; production install + seal need
+  Aryan's explicit go-ahead.
+- [ ] **Identity owner UX**: surface `full`/`canonical_pending` agent and human
+  creations and offer `abandon` (the dispatcher method exists: prepared/full
+  owners only, exact unpublished key removed); a stale local pin conflict
+  leaves a published identity pending until resolved. An unpublished human
+  draft keeps its recovery code in the owner payload until abandoned.
+- [D] **Operator eviction of never-settled member legs** (deferred 2026-10-13):
+  pre-existing receipt-ACK parity; would need retained lineage.
+- [ ] Optional: typed `full` result from execute (UX only, not safety); measure
+  send-path RPC latency in diagnostics.
+- [ ] **Disposable migration acceptance on Scratch**: meta append accepted on
+  hosted Scratch through the MCP connector (2026-10-14; one rolled-back DO
+  block). Still open: `doc_compare_put` and `reaction_pair` hosted runs (now
+  possible: the Scratch version trigger is in place) and any HTTP-level
+  acceptance (needs credentials on this Mac), then PR stack consolidation
+  (item below).
+- [ ] Housekeeping: rewrite the stale local (git-excluded) `CLAUDE.md` as a
+  pointer to AGENTS.md (offered, unanswered); prune ~40 prunable
+  `/private/tmp` worktrees (ask first).
+
 ### Current cloud responsiveness tasks (Aryan, 2026-10-05)
 
 These entries track the current cloud work; historical items below are preserved.

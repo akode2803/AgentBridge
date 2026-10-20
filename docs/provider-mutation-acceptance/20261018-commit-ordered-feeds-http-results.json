@@ -1,0 +1,90 @@
+{
+ "check": "P7 commit-ordered feeds through the real SupabaseTransport and hosted PostgREST",
+ "design": "docs/COMMIT_ORDERED_CURSORS.md",
+ "project": "AgentBridge Scratch (riagjoluhcwjvmfchbzl)",
+ "date": "2026-10-18",
+ "schema": {
+  "p7_commit_ordered_feeds_20261018": {
+   "version": "20261018174433",
+   "source": "docs/supabase_schema.sql, the P7 section verbatim",
+   "sha256": "c2b3b7f548005ad509eb4b4f952e9c1022bbb29933bab11dde27aa1788614c7f"
+  },
+  "scratch_member_policies_20261018": {
+   "version": "20261018174458",
+   "source": "production's member policies on ab_members, ab_docs, ab_logs, ab_change_epochs, copied verbatim from docs/supabase_schema.sql (Scratch had none, so a member session saw no rows)",
+   "sha256": "e39be152812ecb5defcc5ba62ddca9964f3927ce4f22dc836ba4b42f9614903d"
+  }
+ },
+ "fixture": "root p7-feeds-http-20261018: both Scratch logins members (copied from private-pokes-http-20261017), chat room listing both",
+ "index_use": {
+  "method": "EXPLAIN (costs off) of each feed's page query with enable_seqscan off, in a rolled-back block",
+  "ab_docs_feed": "Index Scan using ab_docs_feed_order; Index Cond: root = $1 AND ROW(txid, seq) > ROW(...) AND txid < frontier",
+  "ab_logs_feed": "Index Scan using ab_logs_feed_order; Index Cond: root = $1 AND ROW(txid, id) > ROW(...) AND txid < frontier"
+ },
+ "member_rpc_sql_check": {
+  "method": "rolled-back block as role authenticated with a member's jwt sub",
+  "result": {
+   "frontier_is_number": true,
+   "epoch": null,
+   "doc_rows": 1,
+   "doc_paths": [
+    "chats/room/meta.json"
+   ],
+   "doc_txid_is_number": true,
+   "doc_has_more": false,
+   "doc_too_old": false,
+   "log_rows": 0,
+   "log_too_old": false
+  }
+ },
+ "run_by": "Aryan",
+ "script": "devtools/validate_commit_ordered_feeds_http.py",
+ "script_sha256": "6f6823e2f5096a14b75759ca37bc0bb37b176862c89664910982204c9a2dbaf3",
+ "command": "set -a && . /Users/aryan/.agentbridge/scratch-http.plain.env && set +a && uv run --group dev --extra mcp --extra cloud python devtools/validate_commit_ordered_feeds_http.py --root p7-feeds-http-20261018",
+ "earlier_attempts": [
+  {
+   "result": "network failure, no verdict",
+   "detail": "httpx.ConnectTimeout (TLS handshake timed out) on the frontier read inside the reader's full pull, after both sign-ins and the feed probe; Aryan was on an unstable mobile network. No rows were written."
+  }
+ ],
+ "runs": [
+  {
+   "passed": true,
+   "nonce": "fbeaaabb",
+   "frontier": 2194,
+   "epoch_present": false,
+   "checks": {
+    "counter_cursor_too_old": true,
+    "delta_advances": true,
+    "delta_serves_tombstone": true,
+    "delta_serves_write": true,
+    "idle_delta_is_empty": true,
+    "log_feed_names_the_log": true,
+    "log_feed_restarts_at_frontier": true,
+    "log_reads_in_order": true,
+    "owner_feeds_live": true,
+    "owner_log_feed_sees_own_chat": true,
+    "owner_sees_own_chat": true,
+    "reader_doc_feed_hides_foreign_chat": true,
+    "reader_feeds_live": true,
+    "reader_log_feed_hides_foreign_chat": true,
+    "snapshot_cursor_is_frontier": true,
+    "snapshot_positions_are_ints": true,
+    "snapshot_sees_room": true
+   },
+   "lag_s": {
+    "doc_delete": 0.19,
+    "doc_write": 0.2,
+    "log_append": 0.21,
+    "solo_write": 0.21
+   }
+  }
+ ],
+ "reading": [
+  "the driver's probe found the feed RPCs for a member session, so the parameter names match and it does not fall back to the pre-P7 counters",
+  "PostgREST returns each feed answer as one JSON object and a table select's xid8 txid as a string; the driver handles both",
+  "row security applies through the security-invoker RPCs: a chat only the owner belongs to stayed out of the reader's doc and log feeds",
+  "every lag is about one 0.25 s polling step: no concurrent transaction on Scratch held the frontier",
+  "epoch_present false: Scratch has no change-ledger triggers, so ab_change_epochs has no row for the root (basis \"frontier:\"); production has them"
+ ]
+}

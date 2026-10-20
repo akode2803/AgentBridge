@@ -11,8 +11,8 @@ from ..core.jsonkit import canonical_json_bytes
 from ..core.timekit import new_id, next_ns
 
 __all__ = [
-    "LifecycleError", "LifecycleUnavailable", "ensure_bootstrap", "lifecycle_prefix",
-    "publish_change", "resolve_lifecycle",
+    "LifecycleError", "LifecycleUnavailable", "canonical_bootstrap_id",
+    "ensure_bootstrap", "lifecycle_prefix", "publish_change", "resolve_lifecycle",
 ]
 
 
@@ -278,6 +278,43 @@ def resolve_lifecycle(directory, subject: str, *, store=None) -> dict | None:
     raise LifecycleUnavailable("retained lifecycle head changed repeatedly")
 
 
+def canonical_bootstrap_id(directory, subject: str, *, store=None) -> str | None:
+    """Return the bootstrap id that begins ``subject``'s canonical chain.
+
+    Every accepted record extends its predecessor by ``previous_id`` and only
+    a bootstrap may begin a chain, so this identifies which bootstrap the
+    canonical state descends from, even after later accepted changes. Returns
+    None without any lifecycle; unreadable or inconsistent evidence raises.
+    A chain has no length limit, so the walk is bounded by the subject's
+    listed records: a longer walk can only be a cycle or missing evidence.
+    """
+    current = resolve_lifecycle(directory, subject, store=store)
+    if current is None:
+        return None
+    try:
+        records = len(directory.tx.list_docs(lifecycle_prefix(subject)))
+    except OSError as exc:
+        raise LifecycleUnavailable("lifecycle inventory is unavailable") from exc
+    for _hop in range(records + 1):
+        if current is None:
+            return None
+        if not current["previous_id"]:
+            if current["action"] != "bootstrap":
+                raise LifecycleUnavailable("lifecycle chain lacks its bootstrap")
+            return current["id"]
+        path = _path(subject, current["previous_id"])
+        try:
+            record, _subject_sig = _verify_doc(directory, path, directory.tx.get_doc(path))
+        except LifecycleUnavailable:
+            raise
+        except (LifecycleError, OSError, TypeError, ValueError) as exc:
+            raise LifecycleUnavailable("lifecycle chain is unavailable") from exc
+        if record["id"] != current["previous_id"] or record["subject"] != subject:
+            raise LifecycleUnavailable("lifecycle chain is inconsistent")
+        current = record
+    raise LifecycleUnavailable("lifecycle chain exceeds its bound")
+
+
 def _write(directory, keystore, record: dict, *, subject_proof: bool) -> dict:
     actor_bundle = keystore.load(record["actor"])
     if not actor_bundle:
@@ -292,11 +329,22 @@ def _write(directory, keystore, record: dict, *, subject_proof: bool) -> dict:
         subject_sig = crypto.sign(bundle, signed)
     doc = {"record": record, "sig": crypto.sign(actor_bundle, signed),
            "subject_sig": subject_sig}
-    directory.tx.create_doc(_path(record["subject"], record["id"]), doc)
+    # A bound typed writer keys this immutable record by its unique path.
+    create = getattr(directory.tx, "create_exact_doc", directory.tx.create_doc)
+    create(_path(record["subject"], record["id"]), doc)
     return record
 
 
+def _settle_records(directory, subject: str) -> None:
+    # An earlier ambiguous record write must reach its exact outcome before
+    # this subject's head is read and extended again.
+    settle = getattr(directory.tx, "settle_exact_creates", None)
+    if settle is not None:
+        settle(lifecycle_prefix(subject) + "/")
+
+
 def ensure_bootstrap(directory, keystore, subject: str, *, actor: str) -> dict:
+    _settle_records(directory, subject)
     current = resolve_lifecycle(directory, subject, store=directory.store)
     if current is not None:
         return current
@@ -321,6 +369,7 @@ def publish_change(directory, keystore, subject: str, *, actor: str,
                    action: str, active: bool | None = None,
                    owner: str | None = None, machine: str | None = None,
                    deactivated: str | None = None) -> dict:
+    _settle_records(directory, subject)
     current = resolve_lifecycle(directory, subject, store=directory.store)
     if current is None:
         current = ensure_bootstrap(directory, keystore, subject, actor=actor)

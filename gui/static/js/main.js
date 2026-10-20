@@ -58,6 +58,18 @@ let refreshNeedsRender = false;
 let bootstrapPromise = null;
 let bootstrapEpoch = null;
 let sessionRoutePending = false;
+// A ready session asks once whether a one-time recovery code is still held
+// (a typed sign-up interrupted before or during its display). The server
+// hands each held code out at most once per process, so this never repeats
+// the copy a sign-up or sign-in response is showing.
+let recoveryCheckedViewer = null;
+
+function maybeShowPendingRecoveryCode() {
+  const viewer = App.state?.user;
+  if (!viewer || App.state.restoring || recoveryCheckedViewer === viewer) return;
+  recoveryCheckedViewer = viewer;
+  Promise.resolve(V.showPendingRecoveryCode?.()).catch(() => { /* next start */ });
+}
 
 export async function bootstrapSession() {
   const wantedEpoch = BrowserSession.snapshot().epoch;
@@ -90,6 +102,7 @@ V.bootstrapSession = bootstrapSession;
 
 document.addEventListener("ab:session-reset", () => {
   sessionRoutePending = true;
+  recoveryCheckedViewer = null;
   // These shell surfaces can contain the former viewer's plaintext. Clearing
   // them is synchronous; the accepted bootstrap decides which view replaces
   // them. App-lock/restart covers keep their existing policy and lifecycle.
@@ -235,6 +248,7 @@ async function refreshOnce(rerender) {
   // open/close the SSE stream to match the current server + auth (inert on v1)
   syncRealtime();
   renderChrome();
+  maybeShowPendingRecoveryCode();
   if (sessionRoutePending) {
     // A session transition cleared both surfaces and the old room selection.
     // Re-read the URL only after the new bootstrap passes lock/restart gates.

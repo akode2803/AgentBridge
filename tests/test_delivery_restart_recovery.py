@@ -143,8 +143,8 @@ def test_lost_ack_restart_keeps_durable_envelope_and_projects_once(
             assert mesh.messages_for(chat.id)[-1].body == 'private recovery body'
         after, _ = receiver.tx.read_log(chat.id, P.log_name('sender', 'device'))
         sent_after = [row for row in after if row.get('id') == envelope.id]
-        assert len(sent_after) > len(sent_before)  # At-least-once transport; canonical projection is once.
-        assert all(row == original_record for row in sent_after)
+        # ab_omit_landed_line drops every replay of the landed line.
+        assert sent_after == sent_before == [original_record]
         assert not any(event.type == eventbus.MESSAGE and event.data.get('id') == envelope.id
                        for event in subscription.drain())
         if prepared:

@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-10-14T06:41:04Z",
+  "project_id": "riagjoluhcwjvmfchbzl",
+  "project_name": "AgentBridge Scratch",
+  "postgresql_version": "17.11",
+  "migration": {
+    "version": "20261014064104",
+    "name": "agentbridge_p1b_meta_append_tenure_answer",
+    "statement_bytes": 5059,
+    "statement_sha256": "5983ad2d94983afe03ca7f6fa3aa2d4c0b1ef1d80b430dd23cc64bae5027e417",
+    "function_body_sha256_prefix": {
+      "public.ab_mutation_meta_append": "242f4e5e83dbddc3"
+    }
+  },
+  "supersedes_scratch_migration": {
+    "version": "20261014061026",
+    "field": "ab_mutation_meta_append authority order",
+    "reason": "independent review: membership was checked before the version, so an attempt that lost a race to its own removal or to the group's deletion was refused (42501) instead of answered, which kept its client journal operation and Store row until an epoch closure; now the version is compared first and anyone in the chat's tenure gets applied=false, while only a current member may swap"
+  },
+  "post_migration_shape": {
+    "meta_append_overloads": 1,
+    "security_definer": true,
+    "search_path": "pg_catalog",
+    "execute_anon": false,
+    "execute_authenticated": true,
+    "execute_service_role": false
+  },
+  "acceptance": {
+    "file": "20261014064104-acceptance.sql",
+    "statement_bytes": 12736,
+    "statement_sha256": "158f24303c677b5ff9a0b9abce343fd39aed37d6f1a4d89f4e45e0bf8e665aa7",
+    "transaction": "single DO block ending in a P0001 raise carrying the observations; residue afterwards: 0 members, roots, docs, logs, receipts and change epochs",
+    "observations": {
+      "anon_execute": "42501",
+      "invalid_requests_refused_22023": 5,
+      "stale_seq_applied": false,
+      "stale_seq_exact_replay": true,
+      "wrong_source_epoch_applied": false,
+      "chat_outsider_refused": "42501 meta append is unauthorized",
+      "root_stranger_refused": "42501 meta append is unauthorized",
+      "refusals_changed_nothing": true,
+      "receipts_before_leave": 2,
+      "leave_applied": true,
+      "leave_meta_swapped_with_tenure": true,
+      "leave_seq_advanced": true,
+      "leave_records_in_array_order_in_actor_log": true,
+      "same_operation_other_records": "55000 typed mutation operation collides with existing receipt",
+      "former_member_exact_replay": true,
+      "former_member_fresh_work_at_current_version": "42501 meta append is unauthorized",
+      "former_member_race_lost_to_own_leave": {"applied": false},
+      "never_member_stale_version": "42501 meta append is unauthorized",
+      "replay_appended_nothing": true,
+      "admin_delete_for_everyone_applied": true,
+      "delete_meta_members_empty_tenure_kept": true,
+      "delete_row_soft_deleted": false,
+      "delete_event_last_in_admin_log": true,
+      "log_lines_total": 3,
+      "admin_fresh_work_at_current_version_after_delete": "42501 meta append is unauthorized",
+      "former_member_race_lost_to_deletion": {"applied": false},
+      "nothing_written_after_delete": true,
+      "meta_append_receipts_after_delete": 6
+    }
+  },
+  "limits": {
+    "hosted_concurrent_holder_waiter_acceptance": false,
+    "production_touched": false,
+    "application_activated": false
+  }
+}

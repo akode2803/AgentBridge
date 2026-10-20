@@ -40,6 +40,15 @@ from .sealer import E2EESealer, Sealer
 
 __all__ = ["ConversationProjection", "MessagingService", "OUTBOX_APPEND"]
 
+# How long typed-written meta is served before the mirror shows it.
+WRITTEN_TTL_S = 120.0
+
+
+def _watermark(doc: dict) -> int:
+    value = doc.get("materialized_ns")
+    return value if type(value) is int else 0
+
+
 OUTBOX_APPEND = "append_log"  # outbox kind; target = "<chat_id>|<log_name>"
 MAX_OUTBOX_ATTACHMENTS = 1024  # exact typed consumer manifest-leg bound
 
@@ -98,13 +107,49 @@ class MessagingService:
         self.directory = directory
         self.attachments = attachments
         self.latency = sink_for_store(store)
+        # Meta this process wrote through the typed writer that the local
+        # mirror may not show yet (typed receipts never refresh it), with when
+        # it was written. Typed writes move the watermark strictly forward, so
+        # a mirror copy at or past it is never older. An entry expires: a
+        # mirror that still cannot show the chat may be denied it.
+        self._written: dict[str, tuple[dict, float]] = {}
 
     # ------------------------------------------------------------- membership
     def _materialized_snapshot(self, chat_id: str) -> ChatSnapshot:
         doc = self.tx.get_doc(P.meta(chat_id))
+        written = self._written_doc(chat_id)
+        if written is not None:
+            if isinstance(doc, dict) and _watermark(doc) >= _watermark(written):
+                self._written.pop(chat_id, None)  # the mirror caught up
+            else:
+                doc = written
         if not isinstance(doc, dict):
             raise NotAMember(f"unknown chat {chat_id}")
         return ChatSnapshot.from_dict(doc)
+
+    def remember_meta(self, chat_id: str, doc: dict) -> None:
+        """Serve meta this process just wrote until the mirror shows it."""
+        current = self._written_doc(chat_id)
+        if current is None or _watermark(doc) > _watermark(current):
+            self._written[chat_id] = (deepcopy(doc), time.monotonic())
+
+    def _written_doc(self, chat_id: str) -> dict | None:
+        entry = self._written.get(chat_id)
+        if entry is None:
+            return None
+        # Only a write that keeps me a member expires. One that ended my
+        # membership (leave, delete) stays until the mirror shows that version
+        # or newer: a mirror that cannot refresh must not bring the room back.
+        members = entry[0].get("members")
+        if (isinstance(members, dict) and self.user in members
+                and time.monotonic() - entry[1] > WRITTEN_TTL_S):
+            self._written.pop(chat_id, None)
+            return None
+        return entry[0]
+
+    def written_chat_ids(self) -> list[str]:
+        return [chat_id for chat_id in list(self._written)
+                if self._written_doc(chat_id) is not None]
 
     def snapshot(self, chat_id: str) -> ChatSnapshot:
         materialized = self._materialized_snapshot(chat_id)
@@ -132,10 +177,22 @@ class MessagingService:
 
     # ------------------------------------------------------------------ write
     def _admit_attachment_count(self, prepared: list[PreparedAttachment]) -> None:
+        """Reject a batch the typed consumer can never deliver before it is
+        queued: a durable row it refuses would retry forever and block every
+        later send to that target."""
+        problem = ""
         if len(prepared) > MAX_OUTBOX_ATTACHMENTS:
+            problem = "too many attachments for one message"
+        else:
+            blobs = [item.manifest.get("blob_id") for item in prepared
+                     if isinstance(item, PreparedAttachment)
+                     and isinstance(item.manifest, dict)]
+            if len(blobs) != len(set(map(str, blobs))):
+                problem = "the same attachment is included more than once"
+        if problem:
             if self.attachments is not None:
                 self.attachments.cancel(prepared)
-            raise ValidationError("too many attachments for one message")
+            raise ValidationError(problem)
 
     def post(
         self,
@@ -268,6 +325,26 @@ class MessagingService:
         env = self.build_event(chat_id, event)
         self.commit_envelope(chat_id, env)
         return env
+
+    def commit_action(self, action, *, genesis: bool = False) -> None:
+        """Show a membership action's envelopes now that its meta write
+        applied: cache them and drop the Store row in one transaction. A meta
+        swap already appended them to the provider log; a genesis (an exact
+        create) still enqueues its event, as its creator stays a member."""
+        if genesis:
+            for env in action.envelopes:
+                self._require_event_supported(env.get("event"))
+        self.store.membership_action_commit(
+            action, observed_clock=clock_id(),
+            target=f"{action.chat_id}|{self.membership_log()}" if genesis else None)
+        for env in action.envelopes:
+            self.latency.observe("local_commit", env["id"], at_ns=time.time_ns())
+        if genesis:
+            self._notify_outbox()
+
+    def membership_log(self) -> str:
+        """The log this writer's membership events are appended to."""
+        return P.log_name(self.user, self.machine)
 
     def _require_event_supported(self, event: dict) -> None:
         if (getattr(self.tx, '_journal_writer', None) is not None

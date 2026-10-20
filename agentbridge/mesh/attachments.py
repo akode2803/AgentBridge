@@ -20,7 +20,8 @@ from ..core.errors import ValidationError
 from ..core.timekit import new_id
 from .paths import P
 
-__all__ = ["AttachmentDelivery", "PreparedAttachment", "attachment_path"]
+__all__ = ["AttachmentDelivery", "PreparedAttachment", "attachment_path",
+           "is_chat_object_path"]
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,179}$")
 _SHA_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -71,6 +72,19 @@ def attachment_path(chat_id: str, blob_id: str, record: dict | None = None) -> s
             raise ValidationError("malformed attachment chat id") from None
         return f"blob-stage/{chat_id}/{blob_id}"
     return P.file(chat_id, blob_id)
+
+
+def is_chat_object_path(path: str) -> bool:
+    """A Storage object inside one chat's own folders (``chats/<chat>/...``
+    or ``blob-stage/<chat>/...``): its files, group photo and staged
+    attachments, plus anything else a member uploaded there. Storage RLS
+    still decides who may remove it."""
+    if type(path) is not str or "\x00" in path:
+        return False
+    parts = path.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return False
+    return len(parts) >= 3 and parts[0] in {"chats", "blob-stage"}
 
 
 class AttachmentDelivery:

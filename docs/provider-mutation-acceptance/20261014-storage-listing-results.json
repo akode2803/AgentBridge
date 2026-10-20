@@ -1,0 +1,49 @@
+{
+  "check": "database half of the hosted Storage listing check",
+  "project": "AgentBridge Scratch (riagjoluhcwjvmfchbzl)",
+  "date": "2026-10-14",
+  "sql": "20261014-storage-listing-acceptance.sql",
+  "sql_sha256": "56f95c10f8d1550a9fb7f9ee7a1e0acf31518384bd9e576e38b54da57c0bad26",
+  "method": "one DO block through the Supabase MCP connector; rolled back by its final exception; residue checked afterwards",
+  "storage_schema_latest_migrations": [
+    "revoke-grants-to-unused-operations",
+    "drop-bucketid-objname-index",
+    "objects-delete-marker-index"
+  ],
+  "observed": {
+    "authenticated_can_search": true,
+    "truth": {
+      "chats/live-g0123456789abcdef": 152,
+      "blob-stage/live-g0123456789abcdef": 1,
+      "chats/dead-gfedcba9876543210": 121,
+      "blob-stage/dead-gfedcba9876543210": 3
+    },
+    "alice (live member; final member of the deleted room)": {
+      "chats/live-g0123456789abcdef": {"files": 152, "pages": 5, "folders": 3, "max_page": 100},
+      "blob-stage/live-g0123456789abcdef": {"files": 1, "pages": 1, "folders": 0, "max_page": 1},
+      "chats/dead-gfedcba9876543210": {"files": 121, "pages": 4, "folders": 2, "max_page": 100},
+      "blob-stage/dead-gfedcba9876543210": {"files": 3, "pages": 1, "folders": 0, "max_page": 3},
+      "exact_f105": 1,
+      "exact_missing": 0
+    },
+    "bob (live member; left the deleted room before its deletion)": {
+      "chats/live-g0123456789abcdef": {"files": 152, "pages": 5, "folders": 3, "max_page": 100},
+      "blob-stage/live-g0123456789abcdef": {"files": 0, "pages": 1, "folders": 0, "max_page": 0},
+      "chats/dead-gfedcba9876543210": {"files": 0, "pages": 1, "folders": 0, "max_page": 0},
+      "blob-stage/dead-gfedcba9876543210": {"files": 0, "pages": 1, "folders": 0, "max_page": 0},
+      "exact_f105": 1,
+      "exact_missing": 0
+    },
+    "carol (root member, never in either room)": {
+      "chats/live-g0123456789abcdef": {"files": 0, "pages": 1, "folders": 0, "max_page": 0},
+      "blob-stage/live-g0123456789abcdef": {"files": 0, "pages": 1, "folders": 0, "max_page": 0},
+      "chats/dead-gfedcba9876543210": {"files": 0, "pages": 1, "folders": 0, "max_page": 0},
+      "blob-stage/dead-gfedcba9876543210": {"files": 0, "pages": 1, "folders": 0, "max_page": 0},
+      "exact_f105": 0,
+      "exact_missing": 0
+    }
+  },
+  "residue_after": {"objects": 0, "members": 0, "docs": 0, "roots": 0, "total_objects_unchanged": 7},
+  "conclusion": "The janitor's walk (100 a page, offset paging, recursing into id-less folder rows) finds every object a principal may see: past 100 files, into files/ and unexpected nested folders. A deleted room's final member sees all of it, including another member's unpublished staged objects. A member who left before the deletion, and a root member who was never in the room, see nothing. Bob not seeing alice's unpublished staged object in a live room is the documented orphan limit (BACKLOG 'Unpublished staged attachments become orphans').",
+  "not_covered": "The Storage HTTP layer (the server's own prefix handling and its call into storage.search) and batched remove. Those need a signed-in Scratch session: devtools/validate_blob_storage_http.py."
+}

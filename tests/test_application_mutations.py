@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import FrozenInstanceError
 import threading
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 
@@ -149,6 +150,79 @@ def test_explicit_binding_routes_doc_and_log_without_legacy_or_mirror_claim(worl
     assert provider.legacy_calls == []
 
 
+def test_janitor_purge_uses_a_fresh_key_and_a_lost_reply_settles(world, monkeypatch):
+    client, _provider, _coordinator, journal, writer, proxy = world
+    proxy.bind_journal(writer)
+    real_rpc, lost = client.rpc, []
+
+    class _CommittedThenLost:
+        def __init__(self, query):
+            self.query, self.request = query, query.request
+
+        def execute(self):
+            self.query.execute()  # the provider commits the purge ...
+            raise ConnectionError("reply lost")  # ... and its reply never arrives
+
+    def rpc(name, parameters):
+        query = real_rpc(name, parameters)
+        if name == "ab_mutation_chat_delete" and not lost:
+            lost.append(parameters["p_operation_id"])
+            return _CommittedThenLost(query)
+        return query
+
+    monkeypatch.setattr(client, "rpc", rpc)
+    with pytest.raises(Exception):
+        proxy.delete_chat("room")
+    purge_id = lost[0]
+    # A fresh key, not one any other principal could derive and take first.
+    assert UUID(purge_id).version == 4
+    assert journal.get(EPOCH, purge_id).state != "acknowledged"
+    # The purged chat is gone, so nothing would retry it: the next sweep
+    # settles it, or its unacknowledged receipt would hold rotation.
+    assert proxy.settle_chat_purges() == 1
+    assert journal.get(EPOCH, purge_id).state == "acknowledged"
+    assert proxy.settle_chat_purges() == 0
+    proxy.delete_chat("room")
+    later = [args["p_operation_id"] for name, args in client.calls
+             if name == "ab_mutation_chat_delete"][-1]
+    assert later != purge_id and journal.get(EPOCH, later).state == "acknowledged"
+
+
+def test_bound_storage_deletes_are_one_identity_checked_batch(world, monkeypatch):
+    _client, _provider, _coordinator, _journal, writer, proxy = world
+    from agentbridge.transport import staged_attachments
+
+    removed = []
+    monkeypatch.setattr(staged_attachments.StagedAttachmentPublisher, "remove",
+                        lambda self, paths: removed.append((self.writer, list(paths))))
+    proxy.bind_journal(writer)
+    # Anything in a chat's own folders (Storage RLS decides who may).
+    paths = ["chats/room/avatar.jpg", "chats/room/files/f-1", "chats/room/x/y",
+             "blob-stage/room/f2-a"]
+    proxy.delete_blobs(paths)
+    proxy.delete_blob("chats/room/files/f-2")
+    assert removed == [(writer, paths), (writer, ["chats/room/files/f-2"])]
+
+
+def test_unbound_storage_deletes_register_one_intent_per_100(world, monkeypatch):
+    _client, provider, coordinator, _journal, _writer, proxy = world
+    chunks, intents = [], []
+    monkeypatch.setattr(provider, "delete_blobs", lambda paths: chunks.append(list(paths)))
+    real_begin = coordinator.begin
+    monkeypatch.setattr(coordinator, "begin", lambda changes: intents.append(changes)
+                        or real_begin(changes))
+    room = [f"chats/room/files/f{n:03d}" for n in range(249)] + ["blob-stage/room/f2-a"]
+    proxy.delete_blobs(room)
+    assert [len(chunk) for chunk in chunks] == [100, 100, 50]
+    assert intents[-1] == (Selector("doc_prefix", "blob-stage/room"),
+                           Selector("doc_prefix", "chats/room"))
+    # Objects of more than 8 folders cannot share one intent: one each.
+    deleted = []
+    monkeypatch.setattr(provider, "delete_blob", deleted.append)
+    proxy.delete_blobs([f"chats/c{n}/files/f" for n in range(9)])
+    assert len(deleted) == 9
+
+
 def test_bound_replay_does_not_install_stale_payload_into_warm_mirror(world):
     _client, provider, coordinator, _journal, writer, _proxy = world
     cache = CachingTransport(provider, auto_refresh=False)
@@ -229,17 +303,22 @@ def test_bound_unsupported_writes_and_rebinding_fail_closed(world, tmp_path):
         lambda: proxy.put_reserved_doc("a.json", {}, object()),
         lambda: proxy.put_blob("a.bin", b"x"),
         lambda: proxy.put_blob_from(tmp_path / "a.bin", "a.bin"),
-        lambda: proxy.delete_blob("a.bin"),
         lambda: proxy.purge_deleted_docs(),
     ):
         with pytest.raises(NotImplementedError):
             write()
+    # Storage deletes skip the journal, but only for a chat's own objects.
+    for path in ("a.bin", "chats/room", "chats/room/files/../x", "blob-stage//x",
+                 "chats/room/x\x00", "avatars/alice.jpg", "accounts/alice/a.jpg"):
+        with pytest.raises(ValueError, match="only chat objects"):
+            proxy.delete_blob(path)
+        with pytest.raises(ValueError, match="only chat objects"):
+            proxy.delete_blobs(["chats/room/files/f-1", path])
     for write in (
         lambda: proxy.create_doc("a.json", {}),
         lambda: proxy.delete_doc("a.json"),
         lambda: proxy.create_effect_doc(
             "chats/room/runtime/effects/run/call/state-2.json", {"meta": {}}),
-        lambda: proxy.delete_chat("room"),
     ):
         with pytest.raises(ValueError, match="operation id"):
             write()

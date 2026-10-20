@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-10-14T06:18:19Z",
+  "project_id": "riagjoluhcwjvmfchbzl",
+  "project_name": "AgentBridge Scratch",
+  "postgresql_version": "17.11",
+  "migrations": [
+    {
+      "version": "20261014060208",
+      "name": "agentbridge_p1b_lifecycle_admission_core",
+      "statement_bytes": 18434,
+      "statement_sha256": "ab8470b62d9b39d3de36646b5bfa3a8107c3e0d5e691d48e260b58e2351fa8e4",
+      "function_body_sha256_prefix": {
+        "private.ab_mutation_begin": "c408804e7b2ae6b4",
+        "private.ab_mutation_kind_permits": "5c89b167510cb257",
+        "public.ab_admin_rotate_mutation_epoch": "82a8b33ba2c66416",
+        "public.ab_mutation_epoch_state": "1d3e2c8c0100c9fc"
+      }
+    },
+    {
+      "version": "20261014060330",
+      "name": "agentbridge_p1b_conditional_and_admission_rpcs",
+      "statement_bytes": 25024,
+      "statement_sha256": "0dca2843fe05fb280de8aa68030bd9a475aa1e23d99e0635896c0300a1edce96",
+      "note": "applied text omits one four-line SQL comment above ab_mutation_reaction_pair that the schema file carries; no function body differs",
+      "function_body_sha256_prefix": {
+        "private.ab_mutation_admission_cancel": "6bb8cd9f1308dbb8",
+        "public.ab_ack_mutation_admission_cancel": "a49aec691aea7034",
+        "public.ab_admin_enable_mutation_admission": "e2c7850c80f8557b",
+        "public.ab_admit_mutation_owner": "acce2373869c2665",
+        "public.ab_cancel_mutation_admission": "bd2eb3f0a8bb563e",
+        "public.ab_mutation_doc_compare_put": "44bf2317d2de29b8",
+        "public.ab_mutation_reaction_pair": "ed0e689eb491f56d"
+      }
+    },
+    {
+      "version": "20261014061026",
+      "name": "agentbridge_p1b_meta_append_rpc",
+      "statement_bytes": 5080,
+      "statement_sha256": "9fa8fe29f8152f534e6056c471a9304f9dd73241d96a904ff28c627795734a62",
+      "function_body_sha256_prefix": {
+        "public.ab_mutation_meta_append": "d68826b471fa494e"
+      }
+    }
+  ],
+  "scratch_prerequisite": {
+    "version": "20261014061706",
+    "name": "agentbridge_scratch_docs_version_trigger",
+    "file": "20261014061706-scratch-prerequisite.sql",
+    "statement_bytes": 855,
+    "statement_sha256": "3cbc3203e251f77241b47bcd83c65ad23985ddbad06e063e1b091d2fab4c18ec",
+    "reason": "the Scratch scaffold lacked the clean-install ab_docs_touch trigger, so every document stayed at seq 0 and no compare RPC could match a real version; the first acceptance attempt was refused 22023 at every current-version call for that reason"
+  },
+  "post_migration_shape": {
+    "meta_append_overloads": 1,
+    "security_definer": true,
+    "search_path": "pg_catalog",
+    "execute_anon": false,
+    "execute_authenticated": true,
+    "execute_service_role": false,
+    "admission_legs_kind_check_has_meta_append": true,
+    "receipts_kind_check_has_meta_append": true,
+    "kind_permits_has_meta_append": true
+  },
+  "acceptance": {
+    "file": "20261014061026-acceptance.sql",
+    "statement_bytes": 11138,
+    "statement_sha256": "575f2c3b6ff7317fca327d73518654f387941a514387a62e9d0f75db87bbf874",
+    "transaction": "single DO block ending in a P0001 raise carrying the observations; residue afterwards: 0 members, roots, docs, logs, receipts and change epochs",
+    "observations": {
+      "anon_execute": "42501",
+      "invalid_requests_refused_22023": 5,
+      "invalid_cases": ["expected_seq 0", "empty records", "expected_deleted true", "non-object record", "257 records"],
+      "stale_seq_applied": false,
+      "stale_seq_exact_replay": true,
+      "wrong_source_epoch_applied": false,
+      "chat_outsider_refused": "42501 meta append is unauthorized",
+      "root_stranger_refused": "42501 meta append is unauthorized",
+      "refusals_changed_nothing": true,
+      "receipts_before_leave": 2,
+      "leave_applied": true,
+      "leave_meta_swapped": true,
+      "leave_seq_advanced": true,
+      "leave_records_in_array_order_in_actor_log": true,
+      "same_operation_other_records": "55000 typed mutation operation collides with existing receipt",
+      "former_member_exact_replay": true,
+      "replay_appended_nothing": true,
+      "former_member_fresh_work": "42501 meta append is unauthorized",
+      "admin_delete_for_everyone_applied": true,
+      "delete_meta": {"deleted": true, "members": {}},
+      "delete_row_soft_deleted": false,
+      "delete_event_last_in_admin_log": true,
+      "log_lines_total": 3,
+      "fresh_work_after_delete": "42501 meta append is unauthorized",
+      "meta_append_receipts": 4
+    }
+  },
+  "ci_gate_finding": {
+    "summary": "the first Scratch run showed ab_mutation_begin rejects non-hex payload digests; the new devtools meta-append schedule used 'm', 'h' and 'w' digests and would have failed in CI",
+    "fixed": true
+  },
+  "advisors": {
+    "new_findings_from_meta_append": "authenticated_security_definer_function_executable (intentional, as every typed RPC)",
+    "new_findings_from_prerequisite": "function_search_path_mutable on public.ab_docs_touch (the clean-install trigger function is identical; recorded in BACKLOG)",
+    "preexisting_scaffold_findings_remain": true
+  },
+  "limits": {
+    "hosted_concurrent_holder_waiter_acceptance": false,
+    "doc_compare_put_and_reaction_pair_hosted_acceptance": false,
+    "production_touched": false,
+    "application_activated": false
+  }
+}

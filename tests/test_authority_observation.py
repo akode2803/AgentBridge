@@ -286,7 +286,8 @@ def test_lookup_policy_covers_present_negative_offline_and_online_unknown_withou
     offline = authority.capture_lookup_policy(mirror, CHAT, ("unknown",))
     assert offline.mirror == online.mirror
     assert offline.accounts == (("users/unknown.json", "offline_absent"),)
-    assert provider.calls == calls + ["snapshot_docs"]
+    # a full pull reads the visible chat ids first (P7 catch-up bookkeeping)
+    assert provider.calls == calls + ["list_chat_ids", "snapshot_docs"]
 
 
 def test_health_change_invalidates_policy_at_same_mirror_and_health_aba_is_safe():
