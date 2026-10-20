@@ -219,7 +219,12 @@ def test_attachment_retry_reuses_manifest_after_upload_then_append_failure(
     assert not (ann.attachments.root / blob_id).exists()
 
 
-def test_crash_after_append_retries_same_ids_and_projects_once(world, monkeypatch):
+@pytest.mark.parametrize("line_index", [True, False])
+def test_crash_after_append_retries_same_ids_and_projects_once(
+        world, monkeypatch, clouds, tmp_path, line_index):
+    """With ab_logs_line_once the replay lands no second copy; a schema
+    without it keeps two, and readers still project the message once."""
+    clouds.client(tmp_path / "mesh2").db["_no_log_line_index"] = not line_index
     ann, bob = world["ann"], world["bob"]
     prepared = ann.prepare_attachment(CHAT, "acked.txt", b"ack boundary")
     blob_id = prepared.record["id"]
@@ -239,7 +244,7 @@ def test_crash_after_append_retries_same_ids_and_projects_once(world, monkeypatc
     bob.sync.sync_once([CHAT])
     assert [m.id for m in bob.messages_for(CHAT)] == [env.id]
     records, _ = ann.tx.read_log(CHAT, "ann@mach1", 0)
-    assert [r["id"] for r in records] == [env.id, env.id]
+    assert [r["id"] for r in records] == [env.id] * (1 if line_index else 2)
     assert not (ann.attachments.root / blob_id).exists()
 
 

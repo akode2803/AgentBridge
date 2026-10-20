@@ -280,7 +280,12 @@ TOFU-migrates only identities whose required private keys are local.
   `create_doc` (plain INSERT), not the normal `put_doc` UPSERT: an absent-row
   UPSERT still evaluates UPDATE RLS before the meta can establish membership.
   Identical duplicate creates are idempotent; conflicting duplicates remain
-  denied by the unique key. PostgREST calls use a 6s request deadline instead
+  denied by the unique key. Log appends follow the same rule: the
+  `ab_logs_line_once` unique index (root, chat, log, `md5(line)`) turns the
+  retry of an INSERT whose reply was lost into a 23505, which `append_log`
+  accepts only after reading that identical line back (before the index,
+  such retries wrote byte-identical second rows; readers dedupe by id).
+  PostgREST calls use a 6s request deadline instead
   of the library's 120s default; storage retains a 20s deadline. Fast paths:
   `get_docs` (one paged query), `changed_logs` (`ab_logs` ids are one
   global identity column), and the R76 **doc delta feed** —

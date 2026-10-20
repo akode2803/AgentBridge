@@ -7,7 +7,8 @@ Everything above this layer uses the transport contract.
 Contract highlights (the parts that make a sync transport reliable):
 - ``put_doc`` is ATOMIC and retries transient locks; readers never see half a
   document. ``get_doc`` tolerates missing/corrupt (returns default).
-- ``append_log`` appends exactly one record; ``read_log`` is INCREMENTAL by
+- ``append_log`` appends exactly one record (a retry of a record that already
+  landed is accepted, not written twice); ``read_log`` is INCREMENTAL by
   opaque offset and only advances past COMPLETE records (a half-synced line is
   left for a later pass; a shrunken file resets the offset — callers dedup by
   record id).

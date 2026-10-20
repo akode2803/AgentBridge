@@ -1,5 +1,27 @@
 # Cloud source handoff
 
+## 2026-10-20 one copy per appended line — v0.24.381
+
+A log append whose INSERT committed but whose reply was lost was replayed
+by `SupabaseTransport._retry` and landed twice (production had 8
+byte-identical pairs from four writers, July–October; readers dedupe by
+id, so nothing visible broke). Fix: the `ab_logs_line_once` unique index
+on `(root, chat_id, log_name, md5(line))` (end of docs/supabase_schema.sql;
+it first removes existing copies, lowest id kept, under a share-row-
+exclusive lock), and `append_log` accepts a 23505 only after reading the
+identical line back (`_log_line_landed`, narrowed by the record id).
+Tests: tests/test_supabase_transport.py (lost reply, outbox replay, a
+conflicting 23505 still raises); the fake cloud enforces the index
+(`_no_log_line_index` turns it off; `_lose_log_replies` loses replies).
+Scratch: applied (`log_line_once_20261020`) and accepted as a member
+(docs/provider-mutation-acceptance/20261020-scratch-log-line-once-results.json).
+Production: NOT applied yet; slice
+docs/provider-mutation-acceptance/20261020-log-line-once-slice.sql waits
+for Aryan's go-ahead. Until then the client change is inert there (no
+23505 ever arrives). Typed-path note (Scratch only, unused by clients):
+`ab_mutation_log_append` would now fail with 23505 instead of writing a
+second copy of a line a legacy append already landed.
+
 ## 2026-10-18 commit-ordered feeds (P7) — v0.24.379, review fixes v0.24.380
 
 2026-10-20: an independent review of the client found eight issues, all

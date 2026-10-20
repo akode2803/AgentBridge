@@ -1782,9 +1782,35 @@ class SupabaseTransport(Transport):
             def run():
                 return self._sb().table("ab_logs").insert(row, **kw).execute()
             return run
-        self._write(build)
+        try:
+            self._write(build)
+        except Exception as e:  # noqa: BLE001 - a replay is checked below
+            # ab_logs_line_once lands a line once per log, so a replayed
+            # INSERT whose first try committed before its reply was lost
+            # gets 23505. Accept it only when that identical line is there.
+            if not (_is_unique_violation(e)
+                    and self._log_line_landed(chat_id, log_name, line,
+                                              record.get("id"))):
+                raise
         self._count()
         self._hints.request(_HINT_LOG_S)
+
+    def _log_line_landed(self, chat_id: str, log_name: str, line: str,
+                         record_id: Any) -> bool:
+        """Is this exact line already in the log? Only a unique violation
+        asks; the record id narrows the read, the comparison is exact."""
+        def run():
+            query = (self._sb().table("ab_logs").select("line")
+                     .eq("root", self.root).eq("chat_id", chat_id)
+                     .eq("log_name", log_name))
+            if (isinstance(record_id, str) and record_id.isascii()
+                    and record_id
+                    and all(c.isalnum() or c in ".:-" for c in record_id)):
+                query = query.like("line", f"%{record_id}%")
+            return query.execute()
+        rows = self._retry(run).data
+        self._count(rows)
+        return any(r.get("line") == line for r in rows)
 
     def read_log(
         self, chat_id: str, log_name: str, offset: int = 0

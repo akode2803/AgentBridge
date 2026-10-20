@@ -1,0 +1,23 @@
+{
+ "check": "apply of the ab_logs_line_once section, then a rolled-back member acceptance",
+ "project": "AgentBridge Scratch (riagjoluhcwjvmfchbzl)",
+ "date": "2026-10-20",
+ "authority": "Aryan: \"fix the duplicate append bug now\" (2026-10-20); Scratch applies allowed since 2026-10-14",
+ "before": {"ab_logs_rows": 5, "duplicate_groups": 0, "triggers": ["ab_mutation_legacy_gate", "ab_order_log_id"]},
+ "apply": "apply_migration log_line_once_20261020: the section at the end of docs/supabase_schema.sql, verbatim",
+ "acceptance": {
+  "method": "one DO block as an authenticated member of root p7-feeds-http-20261018 (chat room), ending in an exception so everything rolls back",
+  "observed": {
+   "index": "CREATE UNIQUE INDEX ab_logs_line_once ON public.ab_logs USING btree (root, chat_id, log_name, md5(line))",
+   "member_found": true,
+   "first": "inserted",
+   "replay": "23505",
+   "other_line": "inserted",
+   "same_line_other_log": "inserted",
+   "member_reads_back": 1,
+   "rows_in_tx": 3
+  },
+  "residue_after_rollback": 0
+ },
+ "production": "not applied yet: the rolled-back production experiment was refused by the auto-mode classifier; the apply waits for Aryan's go-ahead (20261020-log-line-once-slice.sql)"
+}

@@ -308,6 +308,37 @@ def test_corrupt_log_row_is_skipped_not_stuck(tx):
     assert off == 999                          # advanced past the bad row
 
 
+@pytest.mark.parametrize("record_id", ["m-1792-ab12cd34", "odd_id%*"])
+def test_append_whose_reply_is_lost_lands_once(tx, monkeypatch, record_id):
+    """The INSERT commits, the reply is lost and the inline retry replays it:
+    the replay's unique violation is accepted as the lost reply (production
+    held 8 byte-identical pairs before ab_logs_line_once)."""
+    from agentbridge.transport import supabase as supabase_mod
+
+    monkeypatch.setattr(supabase_mod, "_RETRY_WAIT", 0)
+    tx._client.db["_lose_log_replies"] = 1
+    tx.append_log("c1", "a@box", {"id": record_id, "body": "once"})
+    assert tx._client.db["_lose_log_replies"] == 0
+    recs, _ = tx.read_log("c1", "a@box", 0)
+    assert recs == [{"id": record_id, "body": "once"}]
+
+    # an outbox retry after a crash replays the same record later
+    tx.append_log("c1", "a@box", {"id": record_id, "body": "once"})
+    assert len(tx.read_log("c1", "a@box", 0)[0]) == 1
+
+
+def test_append_unique_violation_without_the_line_is_not_swallowed(tx, monkeypatch):
+    def conflict(_build):
+        raise RuntimeError("duplicate key value violates unique constraint (23505)")
+
+    monkeypatch.setattr(tx, "_write", conflict)
+    tx._client.db.setdefault("ab_logs", []).append({   # same id, other bytes
+        "id": 7, "root": "team", "chat_id": "c1", "log_name": "a@box",
+        "line": '{"id":"m-1-ab","body":"other"}'})
+    with pytest.raises(RuntimeError, match="23505"):
+        tx.append_log("c1", "a@box", {"id": "m-1-ab", "body": "mine"})
+
+
 def test_delete_chat_wipes_rows_and_docs(tx):
     tx.append_log("c1", "log.jsonl", {"id": "m1"})
     tx.put_doc("chats/c1/meta.json", {"name": "Room"})

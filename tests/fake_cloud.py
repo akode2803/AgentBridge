@@ -209,11 +209,21 @@ class FakeQuery:
                 and r.get("path") == payload.get("path") for r in rows
             ):
                 raise RuntimeError("duplicate key value violates unique constraint (23505)")
+            # ab_logs_line_once; "_no_log_line_index" models a schema without it
+            if (self.table == "ab_logs" and not self.db.get("_no_log_line_index")
+                    and any(all(r.get(key) == payload.get(key)
+                                for key in ("root", "chat_id", "log_name", "line"))
+                            for r in rows)):
+                raise RuntimeError("duplicate key value violates unique constraint (23505)")
             payload["id"] = self.db["_seq"] = self.db.get("_seq", 0) + 1
             if self.table == "ab_logs":
                 payload["txid"] = _write_xid(self.db)
             self._touch(payload)
             rows.append(payload)
+            if self.table == "ab_logs" and self.db.get("_lose_log_replies", 0) > 0:
+                # the INSERT committed; its reply is lost on the way back
+                self.db["_lose_log_replies"] -= 1
+                raise RuntimeError("connection reset by peer")
             return FakeResult([payload])
         if op == "upsert":
             def matching(row):
