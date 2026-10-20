@@ -1494,9 +1494,10 @@ def _validate_p1b_lifecycle_rpcs(database_url: str) -> None:
         f"({_quote(root)}, 'chats/terminal-null-tenure/meta.json', "
         "pg_catalog.jsonb_build_object("
         "'deleted', true, 'members', '{}'::jsonb, 'tenure', null), false); "
+        # Distinct lines: one log holds a line once (ab_logs_line_once).
         "insert into public.ab_logs(root,chat_id,log_name,line) values "
-        f"({_quote(root)}, {_quote(chat)}, 'writer', '{{}}'), "
-        f"({_quote(root)}, {_quote(chat)}, 'writer', '{{}}'), "
+        f"({_quote(root)}, {_quote(chat)}, 'writer', '{{\"n\":1}}'), "
+        f"({_quote(root)}, {_quote(chat)}, 'writer', '{{\"n\":2}}'), "
         f"({_quote(root)}, {_quote(sibling)}, 'writer', '{{}}');",
     )
     # An agent's account doc: its name has no login, and none may claim it.

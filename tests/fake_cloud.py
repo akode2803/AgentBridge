@@ -209,11 +209,15 @@ class FakeQuery:
                 and r.get("path") == payload.get("path") for r in rows
             ):
                 raise RuntimeError("duplicate key value violates unique constraint (23505)")
-            # ab_logs_line_once; "_no_log_line_index" models a schema without it
+            # ab_omit_landed_line skips a line already in its log;
+            # ab_logs_line_once rejects one the trigger missed.
+            # "_no_log_line_skip" drops the trigger, "_no_log_line_index" both.
             if (self.table == "ab_logs" and not self.db.get("_no_log_line_index")
                     and any(all(r.get(key) == payload.get(key)
                                 for key in ("root", "chat_id", "log_name", "line"))
                             for r in rows)):
+                if not self.db.get("_no_log_line_skip"):
+                    return FakeResult([])
                 raise RuntimeError("duplicate key value violates unique constraint (23505)")
             payload["id"] = self.db["_seq"] = self.db.get("_seq", 0) + 1
             if self.table == "ab_logs":

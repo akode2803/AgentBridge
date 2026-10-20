@@ -41,9 +41,11 @@
   Aryan's go-ahead the way `SupabaseTransport.delete_chat` does it: all 7
   docs set `deleted=true, data={}` (r123's state).
 - [~] **A retried log append can land twice** (Aryan: "fix the duplicate
-  append bug now"). v0.24.381: the `ab_logs_line_once` index plus
-  `append_log` accepting a 23505 once the identical line reads back;
-  applied and accepted on Scratch. Gap: the production apply
+  append bug now"). v0.24.381: the `ab_omit_landed_line` trigger
+  skips a line already in its log (old clients never see an error), the
+  `ab_logs_line_once` index backs it, and `append_log` accepts a 23505
+  once the identical line reads back; applied and accepted on Scratch.
+  Gap: the production apply
   (`docs/provider-mutation-acceptance/20261020-log-line-once-slice.sql`,
   which also removes production's 7 remaining duplicate copies) waits for
   Aryan's go-ahead. Found 2026-10-20 re-sending

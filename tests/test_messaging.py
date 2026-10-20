@@ -222,8 +222,8 @@ def test_attachment_retry_reuses_manifest_after_upload_then_append_failure(
 @pytest.mark.parametrize("line_index", [True, False])
 def test_crash_after_append_retries_same_ids_and_projects_once(
         world, monkeypatch, clouds, tmp_path, line_index):
-    """With ab_logs_line_once the replay lands no second copy; a schema
-    without it keeps two, and readers still project the message once."""
+    """The skip trigger drops the replay; a schema without it (and without
+    ab_logs_line_once) keeps two copies, which readers project once."""
     clouds.client(tmp_path / "mesh2").db["_no_log_line_index"] = not line_index
     ann, bob = world["ann"], world["bob"]
     prepared = ann.prepare_attachment(CHAT, "acked.txt", b"ack boundary")

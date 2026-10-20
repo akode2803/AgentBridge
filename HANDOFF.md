@@ -5,22 +5,37 @@
 A log append whose INSERT committed but whose reply was lost was replayed
 by `SupabaseTransport._retry` and landed twice (production had 8
 byte-identical pairs from four writers, July–October; readers dedupe by
-id, so nothing visible broke). Fix: the `ab_logs_line_once` unique index
-on `(root, chat_id, log_name, md5(line))` (end of docs/supabase_schema.sql;
-it first removes existing copies, lowest id kept, under a share-row-
-exclusive lock), and `append_log` accepts a 23505 only after reading the
-identical line back (`_log_line_landed`, narrowed by the record id).
-Tests: tests/test_supabase_transport.py (lost reply, outbox replay, a
-conflicting 23505 still raises); the fake cloud enforces the index
-(`_no_log_line_index` turns it off; `_lose_log_replies` loses replies).
-Scratch: applied (`log_line_once_20261020`) and accepted as a member
-(docs/provider-mutation-acceptance/20261020-scratch-log-line-once-results.json).
-Production: NOT applied yet; slice
-docs/provider-mutation-acceptance/20261020-log-line-once-slice.sql waits
-for Aryan's go-ahead. Until then the client change is inert there (no
-23505 ever arrives). Typed-path note (Scratch only, unused by clients):
-`ab_mutation_log_append` would now fail with 23505 instead of writing a
-second copy of a line a legacy append already landed.
+id, so nothing visible broke). Schema (end of docs/supabase_schema.sql):
+existing copies are removed (lowest id kept) under a share-row-exclusive
+lock; the `ab_logs_line_once` unique index on `(root, chat_id, log_name,
+md5(line))`; and the `ab_omit_landed_line` BEFORE INSERT trigger,
+which skips a line already in its log so the retry succeeds for every
+client. An index alone was rejected: an un-updated client treats its
+23505 as transient and retries forever, parking every later send to that
+chat behind it. The trigger runs with the caller's rights (a reader who
+cannot see the line meets the insert policy, so it reveals nothing) and
+takes ab_order_log_id's ledger-then-log locks first, so a retry racing
+its first try waits for that commit and then sees it. Client:
+`append_log` accepts the index's 23505 (a copy the trigger missed) only
+after reading the identical line back (`_log_line_landed`, narrowed by
+the record id). Tests: tests/test_supabase_transport.py (lost reply with
+and without the trigger; with it the client never meets a 23505; a
+conflicting 23505 still raises), test_delivery_restart_recovery.py and
+test_messaging.py (one copy after a lost reply or a crash before the
+ack; a schema without either keeps two, projected once). The fake cloud
+models both (`_no_log_line_skip` drops the trigger, `_no_log_line_index`
+both; `_lose_log_replies` loses replies). Scratch: applied
+(`log_line_once_20261020`, `log_line_once_skip_20261020`, then
+`log_line_once_rename_20261020`: the trigger's first name fired before
+`ab_mutation_legacy_gate`; `ab_omit_landed_line` fires after it and
+before `ab_order_log_id`) and accepted as members (docs/provider-mutation-acceptance/
+20261020-scratch-log-line-once-results.json). Production: NOT applied
+yet; slice docs/provider-mutation-acceptance/20261020-log-line-once-slice.sql
+waits for Aryan's go-ahead. Typed-path note (Scratch only, unused by
+clients): `ab_mutation_log_append` of a line already in the log now
+records a NULL `row_id` instead of writing a second copy. The CI Postgres
+gate seeded two identical `{}` lines into one log; its fixture now uses
+distinct lines (devtools/validate_mutation_protocol_postgres.py).
 
 ## 2026-10-18 commit-ordered feeds (P7) — v0.24.379, review fixes v0.24.380
 

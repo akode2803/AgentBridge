@@ -308,15 +308,19 @@ def test_corrupt_log_row_is_skipped_not_stuck(tx):
     assert off == 999                          # advanced past the bad row
 
 
+@pytest.mark.parametrize("skip_trigger", [True, False])
 @pytest.mark.parametrize("record_id", ["m-1792-ab12cd34", "odd_id%*"])
-def test_append_whose_reply_is_lost_lands_once(tx, monkeypatch, record_id):
-    """The INSERT commits, the reply is lost and the inline retry replays it:
-    the replay's unique violation is accepted as the lost reply (production
-    held 8 byte-identical pairs before ab_logs_line_once)."""
+def test_append_whose_reply_is_lost_lands_once(tx, monkeypatch, record_id, skip_trigger):
+    """The INSERT commits, the reply is lost and the inline retry replays it
+    (production held 8 byte-identical pairs). The skip trigger drops the
+    replay; without it, the index's 23505 is accepted as the lost reply."""
     from agentbridge.transport import supabase as supabase_mod
 
     monkeypatch.setattr(supabase_mod, "_RETRY_WAIT", 0)
+    tx._client.db["_no_log_line_skip"] = not skip_trigger
     tx._client.db["_lose_log_replies"] = 1
+    if skip_trigger:   # an un-updated client meets no 23505 at all
+        monkeypatch.setattr(tx, "_log_line_landed", lambda *a: pytest.fail("23505"))
     tx.append_log("c1", "a@box", {"id": record_id, "body": "once"})
     assert tx._client.db["_lose_log_replies"] == 0
     recs, _ = tx.read_log("c1", "a@box", 0)

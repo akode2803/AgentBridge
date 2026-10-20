@@ -55,9 +55,6 @@ def test_lost_ack_restart_keeps_durable_envelope_and_projects_once(
             execute = query.execute
 
             def response():
-                if lost[0] and name == 'ab_logs' and query._op[0] == 'select':
-                    # The network stays down: the replay's read-back fails too.
-                    raise TimeoutError('disposable offline read')
                 result = execute()  # Provider mutation commits before its response is lost.
                 if (lost[0] and name == 'ab_logs' and query._op[0] == 'insert'
                         and json.loads(query._op[1]['line']).get('id') == envelope.id):
@@ -146,7 +143,7 @@ def test_lost_ack_restart_keeps_durable_envelope_and_projects_once(
             assert mesh.messages_for(chat.id)[-1].body == 'private recovery body'
         after, _ = receiver.tx.read_log(chat.id, P.log_name('sender', 'device'))
         sent_after = [row for row in after if row.get('id') == envelope.id]
-        # The replay's unique violation reads the landed line back: one copy.
+        # ab_omit_landed_line drops every replay of the landed line.
         assert sent_after == sent_before == [original_record]
         assert not any(event.type == eventbus.MESSAGE and event.data.get('id') == envelope.id
                        for event in subscription.drain())
