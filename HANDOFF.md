@@ -29,9 +29,13 @@ both; `_lose_log_replies` loses replies). Scratch: applied
 `log_line_once_rename_20261020`: the trigger's first name fired before
 `ab_mutation_legacy_gate`; `ab_omit_landed_line` fires after it and
 before `ab_order_log_id`) and accepted as members (docs/provider-mutation-acceptance/
-20261020-scratch-log-line-once-results.json). Production: NOT applied
-yet; slice docs/provider-mutation-acceptance/20261020-log-line-once-slice.sql
-waits for Aryan's go-ahead. Typed-path note (Scratch only, unused by
+20261020-scratch-log-line-once-results.json). Production (Aryan: "yes,
+apply it to production"): a rolled-back experiment as aryan's member
+session (replay skipped with no error, one copy; a fresh line lands with
+its txid), then `20261020143429 log_line_once_20261020`: 7 copies removed
+(1624 -> 1617 rows), index and trigger live, function source hash matches
+(docs/provider-mutation-acceptance/20261020-production-log-line-once-results.json).
+App and agent worker restarted on v0.24.381. Typed-path note (Scratch only, unused by
 clients): `ab_mutation_log_append` of a line already in the log now
 records a NULL `row_id` instead of writing a second copy. The CI Postgres
 gate seeded two identical `{}` lines into one log; its fixture now uses

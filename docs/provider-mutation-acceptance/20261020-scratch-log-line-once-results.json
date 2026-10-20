@@ -34,5 +34,5 @@
    "nonmember_identical": "42501", "rows_in_tx": 2
   }
  },
- "production": "not applied yet: the rolled-back production experiment was refused by the auto-mode classifier; the apply waits for Aryan's go-ahead (20261020-log-line-once-slice.sql)"
+ "production": "applied 2026-10-20 on Aryan's go-ahead after a rolled-back experiment: 20261020-production-log-line-once-results.json"
 }

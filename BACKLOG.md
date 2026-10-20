@@ -45,10 +45,11 @@
   skips a line already in its log (old clients never see an error), the
   `ab_logs_line_once` index backs it, and `append_log` accepts a 23505
   once the identical line reads back; applied and accepted on Scratch.
-  Gap: the production apply
-  (`docs/provider-mutation-acceptance/20261020-log-line-once-slice.sql`,
-  which also removes production's 7 remaining duplicate copies) waits for
-  Aryan's go-ahead. Found 2026-10-20 re-sending
+  Production applied 2026-10-20 on Aryan's go-ahead ("yes, apply it to
+  production"): `20261020143429 log_line_once_20261020`, 7 remaining
+  copies removed, rolled-back member experiment first (evidence
+  `docs/provider-mutation-acceptance/20261020-production-log-line-once-results.json`).
+  Gap: the first real app send after the apply not yet observed. Found 2026-10-20 re-sending
   the stranded messages): `m-1791828234328246000-978c6c91` is in
   production `ab_logs` twice (rows 101364/101366, consecutive txids
   415198/415199, byte-identical) from ONE outbox attempt that took 936 ms

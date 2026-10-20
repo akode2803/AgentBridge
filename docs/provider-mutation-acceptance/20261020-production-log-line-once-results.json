@@ -1,0 +1,45 @@
+{
+ "check": "rolled-back production experiment, then the apply, of the one-copy-per-line slice",
+ "project": "production (eakewaaqbilmtswbbxix)",
+ "date": "2026-10-20",
+ "authority": "Aryan: \"yes, apply it to production\" (2026-10-20)",
+ "sql": "20261020-log-line-once-slice.sql",
+ "sql_sha256": "8c17a2ed1e5e281301a60819fecdf3cfc171a59550549d1798ed994bdc08d35d",
+ "before": {
+  "ab_logs_rows": 1624,
+  "duplicate_copies": 7,
+  "duplicate_pairs": [[107, 108], [255, 256], [86875, 86876], [96686, 96687], [97139, 97140], [101038, 101039], [101097, 101098]],
+  "before_insert_triggers": ["ab_order_log_id"]
+ },
+ "experiment": {
+  "method": "one DO block through the Supabase MCP connector: the slice's DO block, the function and the trigger (via EXECUTE), then as aryan's member session a replay of row 101364's exact line and one fresh probe line in the same log; always rolled back by its final exception",
+  "observed": {
+   "deleted": 7,
+   "rows_after": 1617,
+   "dup_extra_after": 0,
+   "kept": [107, 255, 86875, 96686, 97139, 101038, 101097],
+   "before_insert_triggers": ["ab_omit_landed_line", "ab_order_log_id"],
+   "member_replay": "no error",
+   "member_sees_copies": 1,
+   "member_fresh_line": "inserted",
+   "fresh_line_has_txid": true,
+   "head_moved_to_fresh_row": 101379
+  },
+  "rollback_check": {"rows": 1624, "dup_extra": 7, "probe_rows": 0, "index": null, "function": false, "head": 101364}
+ },
+ "apply": {
+  "method": "apply_migration log_line_once_20261020 of the slice, prefixed with `set local lock_timeout = '5s';`",
+  "migration": "20261020143429 log_line_once_20261020",
+  "observed": {
+   "rows": 1617,
+   "dup_extra": 0,
+   "kept": [107, 255, 86875, 96686, 97139, 101038, 101097],
+   "index": "CREATE UNIQUE INDEX ab_logs_line_once ON public.ab_logs USING btree (root, chat_id, log_name, md5(line))",
+   "before_insert_triggers": ["ab_omit_landed_line", "ab_order_log_id"],
+   "function_security_definer": false,
+   "function_prosrc_sha256": "65038ad44e360bcd8a103036bb416c1eeb1bd727d4423bbc00ab11ac4acd0dd1 (matches the slice's function body)",
+   "function_acl": "{postgres=X/postgres}"
+  }
+ },
+ "after": "the app and agent worker restarted on v0.24.381 at 14:35 UTC; outbox empty, no append errors; no real app send had landed yet when this was written"
+}
