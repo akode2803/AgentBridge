@@ -65,6 +65,17 @@
   101366 was deleted 2026-10-20 on Aryan's go-ahead (guarded on 101364
   holding the identical line); the delete-scope trigger moved the log
   head back to 101364 and emitted the root visibility event.
+- [ ] **Windows CI flakes one timing test per run** (found 2026-10-20 on
+  PR #146): about half the `test (windows-latest)` runs fail exactly one
+  test, a different one each time, each a GUI or fixture deadline (10 s
+  `GUI fixture HTTP timeout`) while another thread sits in a SQLite commit
+  (`mutation_coordinator._transaction`): test_gui_runtime signup (run
+  39442961230, BACKLOG-only commit eaeb65f; 529af68 with identical code
+  passed), test_gui_message_info_session (39438293640),
+  test_local_node_page_owner (39429949063, a BACKLOG-only commit),
+  test_gui_endpoints create-agent (39402645094, before 2026-10-20's work).
+  The runs take 60–72 min. Find why Windows commits stall (synchronous=
+  FULL outbox commits on the runner's disk?) rather than raise deadlines.
 - [x] **Disk nearly full on this Mac** (found 2026-10-20 during the
   restart: 110 MB free of 228 GB; the shell failed with ENOSPC). Freed
   1.9 GB of this session's pytest temp folders and 1.5 GB of unused uv
