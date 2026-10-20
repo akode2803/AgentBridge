@@ -40,7 +40,7 @@
   runtime events; no log rows; meta had no members). Purged 2026-10-20 on
   Aryan's go-ahead the way `SupabaseTransport.delete_chat` does it: all 7
   docs set `deleted=true, data={}` (r123's state).
-- [~] **A retried log append can land twice** (Aryan: "fix the duplicate
+- [x] **A retried log append can land twice** (Aryan: "fix the duplicate
   append bug now"). v0.24.381: the `ab_omit_landed_line` trigger
   skips a line already in its log (old clients never see an error), the
   `ab_logs_line_once` index backs it, and `append_log` accepts a 23505
@@ -49,7 +49,8 @@
   production"): `20261020143429 log_line_once_20261020`, 7 remaining
   copies removed, rolled-back member experiment first (evidence
   `docs/provider-mutation-acceptance/20261020-production-log-line-once-results.json`).
-  Gap: the first real app send after the apply not yet observed. Found 2026-10-20 re-sending
+  Live-verified 2026-10-20 14:49 UTC: Aryan's first send after the apply
+  landed once (row 101381, txid set; local status sent, outbox empty). Found 2026-10-20 re-sending
   the stranded messages): `m-1791828234328246000-978c6c91` is in
   production `ab_logs` twice (rows 101364/101366, consecutive txids
   415198/415199, byte-identical) from ONE outbox attempt that took 936 ms
